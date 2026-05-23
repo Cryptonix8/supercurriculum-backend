@@ -1,0 +1,1693 @@
+// Supercurriculum App - Prisma Schema
+// This defines the complete database structure
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+enum UserRole {
+  STUDENT
+  TEACHER
+  PARENT
+  ADMIN
+}
+
+enum ActivityType {
+  READING
+  WRITING
+  LISTENING
+  WATCHING
+  RESEARCHING
+  STUDENT_LED
+  CREATIVE
+  QUICK_QUIZ
+  SCAFFOLDED_EXERCISE
+  SUPERCURRICULUM_PROJECT
+  EXAM_STYLE
+  RETRIEVAL_PRACTICE
+  INTERLEAVED_PRACTICE
+}
+
+enum Band {
+  NEEDS_SUPPORT
+  DEVELOPING
+  SECURE
+}
+
+enum MasteryLevel {
+  BEGINNER
+  DEVELOPING
+  SECURE
+  MASTERY
+  NEEDS_SUPPORT
+}
+
+enum LearningMode {
+  VIDEO
+  TEXT
+  QUIZZES
+  HANDS_ON
+  PROJECTS
+  MIXED
+}
+
+enum ChallengeLevel {
+  EASY
+  MEDIUM
+  CHALLENGING
+  MIXED
+}
+
+enum ConfidenceLevel {
+  NOT_CONFIDENT
+  SOMEWHAT_CONFIDENT
+  CONFIDENT
+  VERY_CONFIDENT
+}
+
+enum PerformanceLevel {
+  STRONG
+  OK
+  NEEDS_SUPPORT
+}
+
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  SKIPPED
+}
+
+enum PlanStatus {
+  ACTIVE
+  COMPLETED
+  ARCHIVED
+}
+
+enum ContentType {
+  TEXT
+  IMAGE
+  AUDIO
+  VIDEO
+  MIXED
+}
+
+enum BadgeTier {
+  BRONZE
+  SILVER
+  GOLD
+}
+
+enum XpReason {
+  EXERCISE_COMPLETED
+  TASK_COMPLETED
+  CHALLENGE_COMPLETED
+  CORRECT_FINAL_ANSWER
+  HINT_BASED_COMPLETION
+  TUTOR_CHECK_CORRECT
+  MISTAKE_CORRECTED_AFTER_FEEDBACK
+  DAILY_STREAK_BONUS
+  FINAL_ANSWER_ONLY_PENALTY
+  SPAM_WITHOUT_COMPLETION_PENALTY
+}
+
+enum ChallengeScope {
+  PERSONAL
+  CLASSROOM
+}
+
+enum ChallengeAssignmentStatus {
+  ASSIGNED
+  IN_PROGRESS
+  COMPLETED
+  EXPIRED
+}
+
+enum ChatRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+enum TutorFlowStep {
+  INTAKE
+  CLARIFY
+  PLAN
+  TEACH
+  CHECK
+  WRAP_UP
+}
+
+enum DayOfWeek {
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+  SUNDAY
+}
+
+enum KeyStage {
+  KS2
+  KS3
+  KS4
+  KS5
+}
+
+enum ExtensionLevel {
+  BEYOND_CURRICULUM
+  ENRICHMENT
+  FOUNDATION
+  INTERMEDIATE
+  ADVANCED
+}
+
+enum GeneratedBy {
+  AI_AGENT
+  TEACHER
+  HYBRID
+  AI_GENERATED
+}
+
+enum NoteCategory {
+  BEHAVIORAL
+  ACADEMIC
+  GENERAL
+}
+
+enum MiniAssessmentStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  PASSED
+  FAILED
+}
+
+enum DiagnosticTestType {
+  PRE_TEST
+  MID_YEAR
+  POST_TEST
+  END_OF_YEAR
+  CUSTOM
+}
+
+enum DiagnosticTestStatus {
+  SCHEDULED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum AssignmentDifficulty {
+  EASY
+  MEDIUM
+  HARD
+  MIXED
+}
+
+enum AssignmentStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum AssignmentVisibility {
+  PRIVATE
+  SHARED_WITH_SCHOOL
+  PUBLIC
+}
+
+// ============================================
+// USER & AUTHENTICATION
+// ============================================
+
+model User {
+  id        String    @id @default(uuid())
+  email     String    @unique
+  password  String
+  firstName String
+  lastName  String
+  role      UserRole  @default(STUDENT)
+  isActive  Boolean   @default(true)
+  lastLogin DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  // Relations
+  studentProfile            StudentProfile?
+  teacherProfile            TeacherProfile?
+  assessments               Assessment[]
+  studentBands              StudentBand[]
+  weeklyPlans               WeeklyPlan[]
+  submissions               Submission[]
+  chatMessages              ChatMessage[]
+  tutorVideoFeedback        TutorVideoFeedback[]
+  tutorConversationStates   TutorConversationState[]
+  userBadges                UserBadge[]
+  userGamification          UserGamification?
+  createdChallenges         LearningChallenge[]      @relation("ChallengeCreator")
+  assignedChallenges        ChallengeAssignment[]    @relation("ChallengeAssigner")
+  challengeAssignments      ChallengeAssignment[]    @relation("ChallengeStudent")
+  progressSnapshots         ProgressSnapshot[]
+  skillMastery              SkillMastery[]
+  sessions                  LearningSession[]
+  createdDiagnosticTests    DiagnosticTestSchedule[]
+  diagnosticTestAssignments DiagnosticTestAssignment[]
+  createdCustomAssignments  CustomAssignment[]
+  assignedCustomAssignments CustomAssignmentStudent[]
+  sharedAssignmentsWithMe   CustomAssignmentShare[]    @relation("SharedWithMe")
+  sharedAssignmentsByMe     CustomAssignmentShare[]    @relation("SharedByMe")
+  educatorAuditLogsAsEducator EducatorAuditLog[]      @relation("EducatorAuditEducator")
+  educatorAuditLogsAsStudent  EducatorAuditLog[]      @relation("EducatorAuditStudent")
+
+  @@map("users")
+}
+
+model StudentProfile {
+  id          String @id @default(uuid())
+  userId      String @unique
+  yearGroupId String
+
+  // Basic Information
+  nickname           String?
+  age                Int?
+  avatarUrl          String? // Profile photo/avatar URL
+  homeLanguages      String[] // Array of languages
+  englishProficiency String? // e.g., "A2", "B1", "C2"
+
+  // Learning Preferences
+  preferredLearningMode   LearningMode   @default(MIXED)
+  preferredTaskDuration   Int            @default(15) // minutes: 10, 15, 20
+  preferredChallengeLevel ChallengeLevel @default(MEDIUM)
+  weeklyStudyTime         Int            @default(120) // minutes per week for Supercurriculum
+
+  // Legacy fields
+  dailyMinutes      Int      @default(30) // Available study minutes per day
+  interests         String[] // Array of interests
+  preferredSubjects String[] // Array of subject IDs
+
+  // Emotional / Metacognitive Elements
+  subjectConfidence    Json? // {maths: "CONFIDENT", english: "SOMEWHAT_CONFIDENT", ...}
+  attitudeToDifficulty String? @db.Text // Free text or structured data
+  doesNotGiveUp        Boolean @default(true)
+  getsAnxious          Boolean @default(false)
+
+  // AI Tutor Settings
+  communicationTone String @default("friendly") // "child-friendly", "friendly", "academic"
+  shareChatTranscripts Boolean @default(false)
+  shareProgressMetrics Boolean @default(true)
+
+  onboardingCompleted Boolean  @default(false)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  // Relations
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  yearGroup     YearGroup      @relation(fields: [yearGroupId], references: [id])
+  classStudents ClassStudent[]
+
+  @@map("student_profiles")
+}
+
+model TeacherProfile {
+  id     String @id @default(uuid())
+  userId String @unique
+
+  // Contact Information
+  phoneNumber    String?
+  officeLocation String?
+  department     String?
+  jobTitle       String?
+  bio            String? @db.Text
+
+  // Permissions
+  canEditContent    Boolean @default(false) // Can create/edit activities and content
+  canManageUsers    Boolean @default(false) // Can add/edit students
+  canViewAllClasses Boolean @default(false) // View only vs assigned classes only
+  canAssignTasks    Boolean @default(true) // Can assign tasks to students
+  canGradeWork      Boolean @default(true) // Can grade submissions
+
+  // Preferences
+  subjects String[] // Subject IDs they can teach
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  classTeachers ClassTeacher[]
+
+  @@map("teacher_profiles")
+}
+
+model Class {
+  id          String  @id @default(uuid())
+  name        String // "Year 7A", "Year 8 Maths Set 1"
+  description String? @db.Text
+  yearGroupId String?
+  subjectId   String? // Optional: subject-specific class
+
+  // Class room/location
+  room String? // e.g., "Room 301", "Science Lab A"
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  yearGroup     YearGroup?      @relation(fields: [yearGroupId], references: [id])
+  subject       Subject?        @relation(fields: [subjectId], references: [id])
+  classStudents ClassStudent[]
+  classTeachers ClassTeacher[]
+  schedules     ClassSchedule[]
+  invites       ClassInvite[]
+  educatorAuditLogs EducatorAuditLog[]
+
+  @@map("classes")
+}
+
+model ClassStudent {
+  id               String @id @default(uuid())
+  classId          String
+  studentProfileId String
+
+  enrolledAt DateTime @default(now())
+
+  // Relations
+  class          Class          @relation(fields: [classId], references: [id], onDelete: Cascade)
+  studentProfile StudentProfile @relation(fields: [studentProfileId], references: [id], onDelete: Cascade)
+
+  @@unique([classId, studentProfileId])
+  @@map("class_students")
+}
+
+model ClassTeacher {
+  id               String  @id @default(uuid())
+  classId          String
+  teacherProfileId String
+  isMainTeacher    Boolean @default(false) // Primary teacher vs assistant
+
+  assignedAt DateTime @default(now())
+
+  // Relations
+  class          Class          @relation(fields: [classId], references: [id], onDelete: Cascade)
+  teacherProfile TeacherProfile @relation(fields: [teacherProfileId], references: [id], onDelete: Cascade)
+
+  @@unique([classId, teacherProfileId])
+  @@map("class_teachers")
+}
+
+model ClassSchedule {
+  id        String    @id @default(uuid())
+  classId   String
+  dayOfWeek DayOfWeek
+  startTime String // Format: "HH:MM" (e.g., "09:00", "14:30")
+  endTime   String // Format: "HH:MM" (e.g., "10:00", "15:30")
+  room      String? // Override class default room if needed
+  notes     String?   @db.Text
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  class Class @relation(fields: [classId], references: [id], onDelete: Cascade)
+
+  @@index([classId, dayOfWeek])
+  @@map("class_schedules")
+}
+
+model ClassInvite {
+  id        String   @id @default(uuid())
+  classId   String
+  code      String   @unique
+  isActive  Boolean  @default(true)
+  expiresAt DateTime?
+  createdAt DateTime @default(now())
+
+  class Class @relation(fields: [classId], references: [id], onDelete: Cascade)
+
+  @@index([classId, isActive])
+  @@map("class_invites")
+}
+
+model EducatorAuditLog {
+  id         String   @id @default(uuid())
+  educatorId String
+  studentId  String?
+  classId    String?
+  action     String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  educator User  @relation("EducatorAuditEducator", fields: [educatorId], references: [id], onDelete: Cascade)
+  student  User? @relation("EducatorAuditStudent", fields: [studentId], references: [id], onDelete: Cascade)
+  class    Class? @relation(fields: [classId], references: [id], onDelete: Cascade)
+
+  @@index([educatorId, createdAt])
+  @@index([studentId, createdAt])
+  @@map("educator_audit_logs")
+}
+
+// ============================================
+// CONTENT HIERARCHY
+// ============================================
+
+model YearGroup {
+  id                String   @id @default(uuid())
+  name              String // "year_7", "year_8", "dimotiko_1", "gymnasio_1", etc.
+  displayName       String // "Year 7", "Year 8", "Δημοτικό - 1η Τάξη", etc.
+  orderIndex        Int
+  isActive          Boolean  @default(true)
+  locale            String?  @default("en-GB") // "en-GB" or "el-GR"
+  curriculumVersion String? // "uk_v1", "gr_v1"
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  subjects                Subject[]
+  studentProfiles         StudentProfile[]
+  classes                 Class[]
+  curriculumTopics        CurriculumTopic[]
+  diagnosticTestSchedules DiagnosticTestSchedule[]
+  customAssignments       CustomAssignment[]
+
+  @@unique([name, locale])
+  @@index([locale])
+  @@map("year_groups")
+}
+
+model Subject {
+  id                String   @id @default(uuid())
+  yearGroupId       String
+  name              String // "english", "maths", "mathimatika", "glossa", etc.
+  displayName       String // "English", "Maths", "Μαθηματικά", etc.
+  description       String?
+  whyMatters        String?  @db.Text // "Why Supercurriculum matters in..."
+  iconName          String? // For UI
+  colorCode         String? // Hex color code
+  orderIndex        Int
+  isActive          Boolean  @default(true)
+  locale            String?  @default("en-GB") // "en-GB" or "el-GR"
+  curriculumVersion String? // "uk_v1", "gr_v1"
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  yearGroup           YearGroup            @relation(fields: [yearGroupId], references: [id], onDelete: Cascade)
+  skills              Skill[]
+  activities          Activity[]
+  feedbackTests       FeedbackTest[]
+  interventions       Intervention[]
+  studentBands        StudentBand[]
+  skillMastery        SkillMastery[]
+  learningChallenges  LearningChallenge[]
+  classes             Class[]
+  curriculumTopics    CurriculumTopic[]
+  curriculumStandards CurriculumStandard[]
+  customAssignments   CustomAssignment[]
+
+  @@unique([yearGroupId, name, locale])
+  @@index([locale])
+  @@map("subjects")
+}
+
+model Skill {
+  id          String   @id @default(uuid())
+  subjectId   String
+  name        String // "reading", "writing", "listening"
+  displayName String // "Reading", "Writing", "Listening"
+  description String?
+  orderIndex  Int
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  subject       Subject        @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  activities    Activity[]
+  feedbackTests FeedbackTest[]
+  interventions Intervention[]
+  studentBands  StudentBand[]
+  skillMastery  SkillMastery[]
+  learningChallenges LearningChallenge[]
+
+  @@unique([subjectId, name])
+  @@map("skills")
+}
+
+model Activity {
+  id               String       @id @default(uuid())
+  subjectId        String
+  skillId          String
+  title            String
+  description      String?      @db.Text
+  instructions     String       @db.Text
+  activityType     ActivityType
+  difficulty       Band // Which band this activity is designed for
+  estimatedMinutes Int
+  externalUrl      String?
+  resources        Json? // Links, downloads, additional materials
+  isActive         Boolean      @default(true)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  // Relations
+  subject      Subject       @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  skill        Skill         @relation(fields: [skillId], references: [id], onDelete: Cascade)
+  plannedTasks PlannedTask[]
+  submissions  Submission[]
+
+  @@index([subjectId, skillId, difficulty])
+  @@map("activities")
+}
+
+// ============================================
+// ASSESSMENT SYSTEM
+// ============================================
+
+model FeedbackTest {
+  id          String   @id @default(uuid())
+  subjectId   String
+  skillId     String
+  title       String
+  description String?  @db.Text
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  subject                   Subject                    @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  skill                     Skill                      @relation(fields: [skillId], references: [id], onDelete: Cascade)
+  questions                 TestQuestion[]
+  assessments               Assessment[]
+  diagnosticTestAssignments DiagnosticTestAssignment[]
+
+  @@unique([subjectId, skillId])
+  @@map("feedback_tests")
+}
+
+model TestQuestion {
+  id         String   @id @default(uuid())
+  testId     String
+  statement  String   @db.Text // "I can identify key themes in a text"
+  orderIndex Int
+  createdAt  DateTime @default(now())
+
+  // Relations
+  test    FeedbackTest       @relation(fields: [testId], references: [id], onDelete: Cascade)
+  answers AssessmentAnswer[]
+
+  @@map("test_questions")
+}
+
+model Assessment {
+  id          String   @id @default(uuid())
+  userId      String
+  testId      String
+  completedAt DateTime @default(now())
+  totalScore  Float // Average of all answers (1-5)
+  band        Band // Calculated based on totalScore
+
+  // Relations
+  user                     User                         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  test                     FeedbackTest                 @relation(fields: [testId], references: [id], onDelete: Cascade)
+  answers                  AssessmentAnswer[]
+  studentBands             StudentBand[]
+  skillPerformances        DiagnosticSkillPerformance[]
+  diagnosticTestAssignment DiagnosticTestAssignment?
+
+  @@index([userId, testId])
+  @@map("assessments")
+}
+
+model DiagnosticSkillPerformance {
+  id           String           @id @default(uuid())
+  assessmentId String
+  skillId      String
+  score        Float // Percentage score for this skill
+  performance  PerformanceLevel // STRONG, OK, NEEDS_SUPPORT
+  errorTags    String[] // Specific error types identified
+  createdAt    DateTime         @default(now())
+
+  // Relations
+  assessment Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+
+  @@unique([assessmentId, skillId])
+  @@map("diagnostic_skill_performances")
+}
+
+model AssessmentAnswer {
+  id           String @id @default(uuid())
+  assessmentId String
+  questionId   String
+  score        Int // 1-5 scale
+
+  // Relations
+  assessment Assessment   @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  question   TestQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([assessmentId, questionId])
+  @@map("assessment_answers")
+}
+
+model StudentBand {
+  id               String   @id @default(uuid())
+  userId           String
+  subjectId        String
+  skillId          String
+  currentBand      Band
+  lastAssessmentId String?
+  lastUpdated      DateTime @default(now())
+
+  // Relations
+  user           User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subject        Subject     @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  skill          Skill       @relation(fields: [skillId], references: [id], onDelete: Cascade)
+  lastAssessment Assessment? @relation(fields: [lastAssessmentId], references: [id])
+
+  @@unique([userId, subjectId, skillId])
+  @@index([userId])
+  @@map("student_bands")
+}
+
+// ============================================
+// DIAGNOSTIC TEST MANAGEMENT
+// ============================================
+
+model DiagnosticTestSchedule {
+  id          String               @id @default(uuid())
+  title       String
+  description String?              @db.Text
+  testType    DiagnosticTestType   @default(CUSTOM)
+  status      DiagnosticTestStatus @default(SCHEDULED)
+  yearGroupId String
+  classIds    String[] // Classes that should take this test
+  studentIds  String[] // Specific students (if empty, all in class)
+  startDate   DateTime
+  endDate     DateTime
+  createdById String
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  // Relations
+  yearGroup       YearGroup                  @relation(fields: [yearGroupId], references: [id], onDelete: Cascade)
+  createdBy       User                       @relation(fields: [createdById], references: [id])
+  testAssignments DiagnosticTestAssignment[]
+
+  @@index([yearGroupId, status])
+  @@index([startDate, endDate])
+  @@map("diagnostic_test_schedules")
+}
+
+model DiagnosticTestAssignment {
+  id           String    @id @default(uuid())
+  scheduleId   String
+  studentId    String
+  testId       String // FeedbackTest to take
+  assigned     Boolean   @default(true)
+  completedAt  DateTime?
+  assessmentId String?   @unique // Link to completed assessment
+  createdAt    DateTime  @default(now())
+
+  // Relations
+  schedule   DiagnosticTestSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  student    User                   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  test       FeedbackTest           @relation(fields: [testId], references: [id], onDelete: Cascade)
+  assessment Assessment?            @relation(fields: [assessmentId], references: [id])
+
+  @@unique([scheduleId, studentId, testId])
+  @@index([studentId, assigned])
+  @@index([scheduleId, completedAt])
+  @@map("diagnostic_test_assignments")
+}
+
+// ============================================
+// CUSTOM ASSIGNMENTS (AI-GENERATED)
+// ============================================
+
+model CustomAssignment {
+  id          String  @id @default(uuid())
+  title       String
+  description String? @db.Text
+  aiPrompt    String  @db.Text // The original prompt used to generate
+
+  // Assignment Configuration
+  subjectId     String?
+  yearGroupId   String?
+  topic         String?
+  difficulty    AssignmentDifficulty @default(MIXED)
+  duration      Int? // Estimated duration in minutes
+  questionCount Int? // Number of questions/items
+
+  // AI-Generated Content
+  content         Json // Stores the generated questions/content
+  generatedAt     DateTime @default(now())
+  generationModel String? // e.g., "gpt-4", "claude-3"
+
+  // Metadata
+  status      AssignmentStatus     @default(DRAFT)
+  visibility  AssignmentVisibility @default(PRIVATE)
+  createdById String
+  isTemplate  Boolean              @default(false) // Can be used as template
+  usageCount  Int                  @default(0) // How many times used
+
+  // Timestamps
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  publishedAt DateTime?
+
+  // Relations
+  subject    Subject?                  @relation(fields: [subjectId], references: [id])
+  yearGroup  YearGroup?                @relation(fields: [yearGroupId], references: [id])
+  createdBy  User                      @relation(fields: [createdById], references: [id])
+  assignedTo CustomAssignmentStudent[]
+  sharedWith CustomAssignmentShare[]
+  tags       CustomAssignmentTag[]
+
+  @@index([createdById, status])
+  @@index([subjectId, yearGroupId])
+  @@index([visibility, status])
+  @@map("custom_assignments")
+}
+
+model CustomAssignmentStudent {
+  id           String    @id @default(uuid())
+  assignmentId String
+  studentId    String
+  assignedAt   DateTime  @default(now())
+  dueDate      DateTime?
+  completedAt  DateTime?
+  score        Float?
+  feedback     String?   @db.Text
+  timeSpent    Int? // Time spent in minutes
+
+  // Relations
+  assignment CustomAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  student    User             @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([assignmentId, studentId])
+  @@index([studentId, completedAt])
+  @@map("custom_assignment_students")
+}
+
+model CustomAssignmentShare {
+  id           String   @id @default(uuid())
+  assignmentId String
+  sharedWithId String // Teacher/User ID
+  sharedById   String
+  canEdit      Boolean  @default(false)
+  sharedAt     DateTime @default(now())
+
+  // Relations
+  assignment CustomAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  sharedWith User             @relation("SharedWithMe", fields: [sharedWithId], references: [id], onDelete: Cascade)
+  sharedBy   User             @relation("SharedByMe", fields: [sharedById], references: [id])
+
+  @@unique([assignmentId, sharedWithId])
+  @@map("custom_assignment_shares")
+}
+
+model CustomAssignmentTag {
+  id           String @id @default(uuid())
+  assignmentId String
+  tag          String // e.g., "geometry", "shakespeare", "gcse"
+
+  // Relations
+  assignment CustomAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+
+  @@unique([assignmentId, tag])
+  @@index([tag])
+  @@map("custom_assignment_tags")
+}
+
+// ============================================
+// AI TUTOR - SKILL MASTERY TRACKING
+// ============================================
+
+model SkillMastery {
+  id                String       @id @default(uuid())
+  userId            String
+  subjectId         String
+  skillId           String
+  masteryLevel      MasteryLevel @default(BEGINNER)
+  masteryPercentage Float        @default(0.0) // 0-100
+  totalAttempts     Int          @default(0)
+  correctAttempts   Int          @default(0)
+  hintsUsed         Int          @default(0)
+  lastPracticed     DateTime?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  // Relations
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subject Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  skill   Skill   @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, subjectId, skillId])
+  @@index([userId])
+  @@index([userId, masteryLevel])
+  @@map("skill_mastery")
+}
+
+// ============================================
+// INTERVENTION FRAMEWORK
+// ============================================
+
+enum InterventionPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum InterventionStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  ESCALATED
+}
+
+enum SkillGapSeverity {
+  MINOR // 40-49%
+  MODERATE // 30-39%
+  SEVERE // 20-29%
+  CRITICAL // <20%
+}
+
+model Intervention {
+  id              String   @id @default(uuid())
+  subjectId       String
+  skillId         String
+  band            Band
+  description     String   @db.Text // What type of task
+  taskGuidance    String   @db.Text // How to approach
+  expectedOutcome String   @db.Text // What we expect to see
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  subject     Subject                  @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  skill       Skill                    @relation(fields: [skillId], references: [id], onDelete: Cascade)
+  assignments InterventionAssignment[]
+
+  @@unique([subjectId, skillId, band])
+  @@map("interventions")
+}
+
+// Tracks skill gaps identified through assessments
+model SkillGap {
+  id              String           @id @default(uuid())
+  studentId       String
+  subjectId       String
+  skillId         String
+  yearGroupId     String // The year group this skill belongs to
+  severity        SkillGapSeverity
+  percentageScore Float // The actual score that triggered the gap
+  assessmentId    String? // Reference to the assessment that identified the gap
+  lastDetected    DateTime         @default(now())
+  isResolved      Boolean          @default(false)
+  resolvedAt      DateTime?
+  notes           String?          @db.Text
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  // Relations
+  interventionAssignments InterventionAssignment[]
+  alerts                  SkillGapAlert[]
+
+  @@unique([studentId, subjectId, skillId])
+  @@index([studentId, isResolved])
+  @@index([severity, isResolved])
+  @@index([lastDetected])
+  @@map("skill_gaps")
+}
+
+// Automated alerts for skill gaps
+model SkillGapAlert {
+  id           String    @id @default(uuid())
+  skillGapId   String
+  studentId    String
+  teacherId    String? // Assigned teacher to notify
+  message      String    @db.Text
+  isRead       Boolean   @default(false)
+  isSnoozed    Boolean   @default(false)
+  snoozedUntil DateTime?
+  createdAt    DateTime  @default(now())
+  readAt       DateTime?
+
+  // Relations
+  skillGap SkillGap @relation(fields: [skillGapId], references: [id], onDelete: Cascade)
+
+  @@index([teacherId, isRead])
+  @@index([createdAt])
+  @@map("skill_gap_alerts")
+}
+
+// Intervention assignments to students
+model InterventionAssignment {
+  id             String  @id @default(uuid())
+  studentId      String
+  teacherId      String // Teacher who assigned it
+  skillGapId     String? // Optional: linked to a skill gap
+  interventionId String? // Optional: linked to a predefined intervention
+
+  // Assignment details
+  title             String
+  description       String               @db.Text
+  targetYearGroupId String? // For backfill: target year group content
+  targetSubjectId   String
+  targetSkillId     String
+  priority          InterventionPriority @default(MEDIUM)
+  status            InterventionStatus   @default(PENDING)
+
+  // Micro-lessons/content
+  microLessons Json? // Array of micro-lesson content
+  activities   Json? // Array of activity references
+
+  // Tracking
+  assignedAt  DateTime  @default(now())
+  dueDate     DateTime?
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  // Performance tracking
+  preScore              Float? // Score before intervention
+  postScore             Float? // Score after intervention
+  improvementPercentage Float? // Calculated improvement
+  attemptsCount         Int    @default(0)
+  timeSpent             Int    @default(0) // minutes
+
+  // Escalation
+  escalationLevel Int       @default(0)
+  escalatedAt     DateTime?
+  escalationNotes String?   @db.Text
+
+  // Relations
+  skillGap     SkillGap?                 @relation(fields: [skillGapId], references: [id])
+  intervention Intervention?             @relation(fields: [interventionId], references: [id])
+  progressLogs InterventionProgressLog[]
+
+  @@index([studentId, status])
+  @@index([teacherId, status])
+  @@index([priority, status])
+  @@index([assignedAt])
+  @@map("intervention_assignments")
+}
+
+// Track progress on intervention assignments
+model InterventionProgressLog {
+  id                String   @id @default(uuid())
+  assignmentId      String
+  activityCompleted String? // Which activity/lesson was completed
+  score             Float?
+  timeSpent         Int // minutes
+  notes             String?  @db.Text
+  wasSuccessful     Boolean  @default(false)
+  createdAt         DateTime @default(now())
+
+  // Relations
+  assignment InterventionAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+
+  @@index([assignmentId])
+  @@index([createdAt])
+  @@map("intervention_progress_logs")
+}
+
+// Mini-assessments to confirm gap closure
+model MiniAssessment {
+  id                       String  @id @default(uuid())
+  interventionAssignmentId String? // Optional: linked to intervention
+  studentId                String
+  teacherId                String? // Who created it
+  skillGapId               String? // Optional: linked to skill gap
+
+  title           String
+  description     String? @db.Text
+  targetSkillId   String
+  targetSubjectId String
+
+  // Assessment content
+  questions      Json // Array of questions
+  totalQuestions Int   @default(0)
+  passingScore   Float @default(70.0) // Percentage to pass
+
+  // Status
+  status      MiniAssessmentStatus @default(PENDING)
+  assignedAt  DateTime             @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  // Results
+  studentAnswers Json? // Student's answers
+  score          Float? // Percentage score
+  passed         Boolean @default(false)
+  feedback       String? @db.Text
+
+  // Tracking
+  timeSpent     Int @default(0) // minutes
+  attemptsCount Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([studentId, status])
+  @@index([interventionAssignmentId])
+  @@index([skillGapId])
+  @@map("mini_assessments")
+}
+
+// ============================================
+// WEEKLY PLANNING
+// ============================================
+
+model WeeklyPlan {
+  id          String     @id @default(uuid())
+  userId      String
+  weekStart   DateTime // Start of week (Monday)
+  weekEnd     DateTime // End of week (Sunday)
+  status      PlanStatus @default(ACTIVE)
+  generatedAt DateTime   @default(now())
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  // Relations
+  user  User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tasks PlannedTask[]
+
+  @@unique([userId, weekStart])
+  @@index([userId, status])
+  @@map("weekly_plans")
+}
+
+model PlannedTask {
+  id           String     @id @default(uuid())
+  planId       String
+  activityId   String? // Optional - activities are generated on-the-fly
+  scheduledFor DateTime // Date this task is scheduled
+  orderIndex   Int // Order within that day
+  status       TaskStatus @default(PENDING)
+  startedAt    DateTime?
+  completedAt  DateTime?
+  
+  // Activity data stored directly (generated on-the-fly, not persisted in Activity table)
+  activityData Json? // {title, description, instructions, content, subjectId, skillId, activityType, difficulty, estimatedMinutes, resources}
+  
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  // Relations
+  plan        WeeklyPlan   @relation(fields: [planId], references: [id], onDelete: Cascade)
+  activity    Activity?    @relation(fields: [activityId], references: [id], onDelete: SetNull)
+  submissions Submission[]
+
+  @@index([planId, scheduledFor])
+  @@map("planned_tasks")
+}
+
+// ============================================
+// SUBMISSIONS & AI FEEDBACK
+// ============================================
+
+model Submission {
+  id                  String      @id @default(uuid())
+  userId              String
+  plannedTaskId       String?
+  activityId          String
+  contentType         ContentType @default(TEXT)
+  textContent         String?     @db.Text
+  mediaUrls           Json? // Array of URLs to uploaded media
+  submittedAt         DateTime    @default(now())
+  aiFeedback          Json? // {strength, nextStep, modelAnswer}
+  feedbackGeneratedAt DateTime?
+  teacherComment      String?     @db.Text
+  teacherCommentedAt  DateTime?
+
+  // Relations
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plannedTask PlannedTask? @relation(fields: [plannedTaskId], references: [id], onDelete: SetNull)
+  activity    Activity     @relation(fields: [activityId], references: [id], onDelete: Cascade)
+
+  @@index([userId, submittedAt])
+  @@map("submissions")
+}
+
+// ============================================
+// AI CHAT
+// ============================================
+
+model ChatMessage {
+  id         String   @id @default(uuid())
+  userId     String
+  sessionId  String // To group conversations
+  role       ChatRole
+  content    String   @db.Text
+  context    Json? // Year, subject, recent tasks, etc.
+  tokenCount Int?
+  createdAt  DateTime @default(now())
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, sessionId])
+  @@map("chat_messages")
+}
+
+model TutorConversationState {
+  id                          String        @id @default(uuid())
+  userId                      String
+  sessionId                   String
+  grade                       String?
+  subject                     String?
+  chapter                     String?
+  learningMode                String?
+  flowStep                    TutorFlowStep @default(INTAKE)
+  askedFields                 Json?
+  answeredFields              Json?
+  clarificationCount          Int           @default(0)
+  repeatedQuestionCount       Int           @default(0)
+  repeatedMissingFieldCount   Int           @default(0)
+  stalledTurnCount            Int           @default(0)
+  lastAssistantQuestionHash   String?
+  lastAssistantMessageHash    String?
+  lastProgressAt              DateTime?
+  assumptions                 Json?
+  lastTransition              Json?
+  createdAt                   DateTime      @default(now())
+  updatedAt                   DateTime      @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, sessionId])
+  @@index([userId, updatedAt])
+  @@index([flowStep, updatedAt])
+  @@map("tutor_conversation_states")
+}
+
+// ============================================
+// TUTOR SIMULATION (QA — not production chat)
+// ============================================
+
+model TutorSimulationRun {
+  id                   String   @id @default(uuid())
+  createdAt            DateTime @default(now())
+  scenarioSetVersion   String
+  tutorConfigVersion   String
+  environment          String   @default("qa")
+  triggeredByUserId    String?
+  triggerSource        String?
+  totalScenarios       Int
+  passedCount          Int
+  failedCount          Int
+  passRate             Float
+  aggregateScores      Json?
+  regression           Json?
+  durationMs           Int?
+  status               String   @default("completed")
+  errorMessage         String?
+  results              TutorSimulationScenarioResult[]
+
+  @@index([createdAt])
+  @@index([scenarioSetVersion, tutorConfigVersion, createdAt])
+  @@map("tutor_simulation_runs")
+}
+
+model TutorSimulationScenarioResult {
+  id              String   @id @default(uuid())
+  runId           String
+  scenarioId      String
+  title           String?
+  passed          Boolean
+  scores          Json
+  transcript      Json
+  finalState      Json?
+  failures        Json
+  recommendations Json?
+
+  run TutorSimulationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId])
+  @@map("tutor_simulation_scenario_results")
+}
+
+model TutorVideoConfig {
+  id                String   @id @default("default")
+  allowlistChannels Json? // Array<string>
+  blocklistChannels Json? // Array<string>
+  blocklistKeywords Json? // Array<string>
+  preferredKeywords Json? // Array<string>
+  minDurationSec    Int      @default(180)
+  maxDurationSec    Int      @default(900)
+  maxResults        Int      @default(5)
+  autoSuggestEnabled Boolean @default(true)
+  requireGreek      Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@map("tutor_video_config")
+}
+
+model TutorVideoFeedback {
+  id        String   @id @default(uuid())
+  userId    String
+  sessionId String?
+  videoId   String
+  query     String
+  clicked   Boolean  @default(false)
+  helpful   Boolean?
+  reported  Boolean  @default(false)
+  reason    String?  @db.Text
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([videoId, createdAt])
+  @@map("tutor_video_feedback")
+}
+
+model CopyIssueReport {
+  id        String   @id @default(uuid())
+  userId    String?
+  screenId  String
+  textKey   String?
+  rawText   String   @db.Text
+  locale    String?
+  context   Json?
+  status    String   @default("OPEN")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([screenId, createdAt])
+  @@index([status, createdAt])
+  @@map("copy_issue_reports")
+}
+
+// ============================================
+// AI TUTOR - LEARNING SESSIONS
+// ============================================
+
+model LearningSession {
+  id             String    @id @default(uuid())
+  userId         String
+  subjectId      String?
+  duration       Int // minutes
+  status         String    @default("active") // active, completed, interrupted
+  sessionPlan    Json? // {reviewQuestions: [...], newConcepts: [...], mainExercises: [...], reflection: [...]}
+  completedItems Json? // Array of completed item IDs
+  adaptations    Json? // Log of difficulty adjustments made during session
+  startedAt      DateTime  @default(now())
+  completedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // Relations
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionItems     SessionItem[]
+  interventionLogs InterventionLog[]
+
+  @@index([userId, status])
+  @@index([userId, startedAt])
+  @@map("learning_sessions")
+}
+
+model SessionItem {
+  id             String    @id @default(uuid())
+  sessionId      String
+  itemType       String // "review", "new_concept", "main_exercise", "reflection"
+  skillId        String?
+  question       String    @db.Text
+  expectedAnswer String?   @db.Text
+  difficulty     String // "easy", "medium", "hard", "extension"
+  orderIndex     Int
+  studentAnswer  String?   @db.Text
+  isCorrect      Boolean?
+  hintsGiven     Json? // Array of hints that were provided
+  timeSpent      Int? // seconds
+  attemptedAt    DateTime?
+  createdAt      DateTime  @default(now())
+
+  // Relations
+  session LearningSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, orderIndex])
+  @@map("session_items")
+}
+
+model InterventionLog {
+  id               String    @id @default(uuid())
+  sessionId        String
+  skillId          String
+  triggeredAt      DateTime  @default(now())
+  reason           String    @db.Text // "Multiple errors in same skill"
+  interventionType String // "micro_lesson", "guided_practice", "independent_practice"
+  content          Json // The intervention content provided
+  wasSuccessful    Boolean   @default(false)
+  escalated        Boolean   @default(false)
+  escalationNote   String?   @db.Text
+  completedAt      DateTime?
+
+  // Relations
+  session LearningSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("intervention_logs")
+}
+
+// ============================================
+// PROGRESS & GAMIFICATION
+// ============================================
+
+model Badge {
+  id          String    @id @default(uuid())
+  name        String    @unique
+  displayName String
+  description String    @db.Text
+  iconName    String
+  criteria    Json // Rules to earn: {type: "tasks_completed", count: 10}
+  points      Int       @default(0)
+  tier        BadgeTier @default(BRONZE)
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+
+  // Relations
+  userBadges UserBadge[]
+
+  @@map("badges")
+}
+
+model UserBadge {
+  id       String   @id @default(uuid())
+  userId   String
+  badgeId  String
+  earnedAt DateTime @default(now())
+  metadata Json? // Context when earned
+
+  // Relations
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  badge Badge @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, badgeId])
+  @@index([userId])
+  @@map("user_badges")
+}
+
+model ProgressSnapshot {
+  id             String   @id @default(uuid())
+  userId         String
+  date           DateTime @db.Date
+  tasksCompleted Int      @default(0)
+  tasksAssigned  Int      @default(0)
+  averageScore   Float?
+  subjectScores  Json? // {english: 4.2, maths: 3.8, ...}
+  weekStreak     Int      @default(0)
+  totalBadges    Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@index([userId, date])
+  @@map("progress_snapshots")
+}
+
+model UserGamification {
+  id            String    @id @default(uuid())
+  userId        String    @unique
+  xp            Int       @default(0)
+  level         Int       @default(1)
+  studyStreak   Int       @default(0)
+  lastStudyDate DateTime? @db.Date
+  freezeUsedAt  DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  xpEvents XpEvent[]
+
+  @@map("user_gamification")
+}
+
+model XpEvent {
+  id        String   @id @default(uuid())
+  userId    String
+  amount    Int
+  reason    XpReason
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  // Relations
+  gamification UserGamification @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("xp_events")
+}
+
+model LearningChallenge {
+  id          String         @id @default(uuid())
+  title       String
+  description String         @db.Text
+  createdById String?
+  subjectId   String?
+  skillId     String?
+  scope       ChallengeScope @default(PERSONAL)
+  targetCount Int            @default(1)
+  xpReward    Int            @default(30)
+  startDate   DateTime?
+  endDate     DateTime?
+  isActive    Boolean        @default(true)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  // Relations
+  createdBy   User?                 @relation("ChallengeCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  subject     Subject?              @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+  skill       Skill?                @relation(fields: [skillId], references: [id], onDelete: SetNull)
+  assignments ChallengeAssignment[]
+
+  @@index([createdById, isActive])
+  @@index([scope, isActive])
+  @@map("learning_challenges")
+}
+
+model ChallengeAssignment {
+  id           String                    @id @default(uuid())
+  challengeId  String
+  studentId    String
+  assignedById String?
+  status       ChallengeAssignmentStatus @default(ASSIGNED)
+  progress     Int                       @default(0)
+  completedAt  DateTime?
+  metadata     Json?
+  createdAt    DateTime                  @default(now())
+  updatedAt    DateTime                  @updatedAt
+
+  // Relations
+  challenge   LearningChallenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  student     User              @relation("ChallengeStudent", fields: [studentId], references: [id], onDelete: Cascade)
+  assignedBy  User?             @relation("ChallengeAssigner", fields: [assignedById], references: [id], onDelete: SetNull)
+
+  @@unique([challengeId, studentId])
+  @@index([studentId, status])
+  @@index([assignedById, status])
+  @@map("challenge_assignments")
+}
+
+// ============================================
+// TEACHER CONTROLS & OVERRIDES
+// ============================================
+
+model TeacherOverride {
+  id           String    @id @default(uuid())
+  studentId    String
+  teacherId    String
+  subjectId    String?
+  skillId      String?
+  overrideType String // "backfill", "skip_ahead", "custom_difficulty", "lock_topic"
+  settings     Json // Specific override settings
+  reason       String?   @db.Text
+  isActive     Boolean   @default(true)
+  expiresAt    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([studentId, isActive])
+  @@map("teacher_overrides")
+}
+
+model TeacherNote {
+  id                 String       @id @default(uuid())
+  studentId          String
+  teacherId          String
+  subjectId          String?
+  skillId            String?
+  noteCategory       NoteCategory @default(GENERAL)
+  noteType           String // "observation", "intervention_needed", "praise", "concern"
+  content            String       @db.Text
+  isVisibleToStudent Boolean      @default(false)
+  isVisibleToParent  Boolean      @default(false)
+  flaggedForFollowUp Boolean      @default(false)
+  followUpDate       DateTime?
+  followUpCompleted  Boolean      @default(false)
+  attachments        Json? // Array of file URLs/references
+  tags               String[] // Additional tags for filtering
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  @@index([studentId])
+  @@index([teacherId, flaggedForFollowUp])
+  @@index([noteCategory])
+  @@map("teacher_notes")
+}
+
+// ============================================
+// PARENT VIEW SUMMARIES
+// ============================================
+
+model ParentSummary {
+  id                String   @id @default(uuid())
+  studentId         String
+  weekStart         DateTime
+  weekEnd           DateTime
+  totalStudyMinutes Int      @default(0)
+  sessionsCompleted Int      @default(0)
+  subjectSummaries  Json // {maths: {status: "ON_TRACK", message: "..."}, english: {...}}
+  recommendations   String[] // Array of friendly recommendations
+  highlights        String[] // Positive achievements to share
+  generatedAt       DateTime @default(now())
+
+  @@unique([studentId, weekStart])
+  @@index([studentId])
+  @@map("parent_summaries")
+}
+
+// ============================================
+// CURRICULUM & AI AGENT SYSTEM
+// ============================================
+
+model CurriculumTopic {
+  id                    String   @id @default(uuid())
+  yearGroupId           String
+  subjectId             String
+  topicName             String
+  keyStage              KeyStage
+  learningObjectives    Json // Array of learning objectives
+  nationalCurriculumRef String? // Reference to national curriculum
+  coreContent           String?  @db.Text
+  extendedContent       String?  @db.Text
+  keySkills             String[] // Array of key skills
+  priorKnowledge        String[] // Array of prior knowledge requirements
+  locale                String?  @default("en-GB") // "en-GB" or "el-GR"
+  curriculumVersion     String? // "uk_v1", "gr_v1"
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  // Relations
+  yearGroup                 YearGroup                 @relation(fields: [yearGroupId], references: [id], onDelete: Cascade)
+  subject                   Subject                   @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  supercurriculumActivities SupercurriculumActivity[]
+
+  @@index([yearGroupId, subjectId])
+  @@index([keyStage])
+  @@index([locale])
+  @@map("curriculum_topics")
+}
+
+model SupercurriculumActivity {
+  id                  String         @id @default(uuid())
+  curriculumTopicId   String
+  title               String
+  description         String?        @db.Text
+  instructions        String         @db.Text
+  successCriteria     String?        @db.Text
+  extensionLevel      ExtensionLevel
+  curriculumAlignment Int // 0-100 score
+  generatedBy         GeneratedBy
+  teacherApproved     Boolean        @default(false)
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  // Relations
+  curriculumTopic CurriculumTopic @relation(fields: [curriculumTopicId], references: [id], onDelete: Cascade)
+
+  @@index([curriculumTopicId])
+  @@index([extensionLevel])
+  @@index([generatedBy])
+  @@index([teacherApproved])
+  @@map("supercurriculum_activities")
+}
+
+model CurriculumStandard {
+  id                 String   @id @default(uuid())
+  standardCode       String   @unique // e.g., "NC-KS3-ENG-01"
+  keyStage           KeyStage
+  subjectId          String
+  standardText       String   @db.Text // Official NC wording
+  assessmentCriteria Json // JSON structure for assessment criteria
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  // Relations
+  subject Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+  @@index([keyStage, subjectId])
+  @@index([standardCode])
+  @@map("curriculum_standards")
+}
+
+// ============================================
+// ONBOARDING TESTS
+// ============================================
+
+// Personality test for learning style assessment
+model PersonalityTest {
+  id          String    @id @default(uuid())
+  userId      String
+  testType    String    @default("LEARNING_STYLE") // LEARNING_STYLE, MOTIVATION, etc.
+  questions   Json // Test questions
+  answers     Json? // Student's answers
+  results     Json? // Analyzed results/learning profile
+  status      String    @default("PENDING") // PENDING, IN_PROGRESS, COMPLETED
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([userId, testType])
+  @@index([userId])
+  @@map("personality_tests")
+}
+
+// Diagnostic test for prior knowledge assessment
+model DiagnosticOnboardingTest {
+  id          String    @id @default(uuid())
+  userId      String
+  yearGroupId String
+  questions   Json // AI-generated diagnostic questions
+  answers     Json? // Student's answers
+  results     Json? // Scored results with gap analysis
+  score       Float? // Overall percentage score
+  status      String    @default("PENDING") // PENDING, IN_PROGRESS, COMPLETED
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([userId, yearGroupId])
+  @@index([userId])
+  @@index([yearGroupId])
+  @@map("diagnostic_onboarding_tests")
+}
