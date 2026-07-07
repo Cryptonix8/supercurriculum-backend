@@ -150,6 +150,7 @@ export class AiService {
     explainDepth?: 'short' | 'normal' | 'detailed';
     responseLanguage?: TutorSpokenLanguage;
     languageInstruction?: string;
+    inputMode?: 'voice' | 'text';
   }): string {
     const intent = this.detectTutorIntent({
       message: params.message,
@@ -210,6 +211,13 @@ export class AiService {
       }
     })();
 
+    const voiceInstruction = params.inputMode === 'voice'
+      ? [
+          'This request may come from a voice message, but it must follow the exact same tutoring rules as a typed message.',
+          'Do not skip the requested practice content. If the student asks for practice problems, provide the full problems as separate items in the steps array rather than only numbers or placeholders.',
+        ].join('\n')
+      : undefined;
+
     const contract = [
       'Response contract:',
       '{"message":"...","structuredContent":{"plan":"...","hints":[],"steps":[],"examples":[],"exercise":"...","exerciseAnswers":"...","finalAnswer":"...","quickCheck":"...","commonMistakes":[],"recap":"...","visualAid":"..."}}',
@@ -223,7 +231,7 @@ export class AiService {
       `Education level context: ${EDUCATION_LEVELS_FOR_AI}`,
     ].join('\n');
 
-    return [base, intentPrompt, contract, params.languageInstruction || ''].filter(Boolean).join('\n\n');
+    return [base, intentPrompt, voiceInstruction, contract, params.languageInstruction || ''].filter(Boolean).join('\n\n');
   }
 
   /**
@@ -312,6 +320,7 @@ ${params.studentSubmission}
       locale?: string;
       fastResponse?: boolean;
       preferFastResponses?: boolean;
+      inputMode?: 'voice' | 'text';
     };
   }) {
     const state = await this.tutorConversationState.loadOrCreateState({
@@ -532,6 +541,7 @@ ${params.studentSubmission}
       explainDepth,
       responseLanguage,
       languageInstruction,
+      inputMode: params.context?.inputMode,
     });
 
     // Build messages array
@@ -1674,12 +1684,22 @@ Use clear step-by-step equations where relevant (one transformation per line) an
   }
 
   private toStringArray(value: unknown): string[] | undefined {
+    if (typeof value === 'string') {
+      const normalized = this.splitListLikeText(value);
+      return normalized.length ? normalized : undefined;
+    }
     if (!Array.isArray(value)) {
       return undefined;
     }
     const normalized = value.flatMap((entry) => {
-      if (typeof entry !== 'string') return [];
-      return this.splitListLikeText(entry);
+      if (typeof entry === 'string') {
+        return this.splitListLikeText(entry);
+      }
+      if (entry && typeof entry === 'object') {
+        const candidate = (entry as Record<string, unknown>).text ?? (entry as Record<string, unknown>).content ?? (entry as Record<string, unknown>).value;
+        return typeof candidate === 'string' ? this.splitListLikeText(candidate) : [];
+      }
+      return [];
     });
     return normalized.length ? normalized : undefined;
   }
@@ -1958,6 +1978,7 @@ Use clear step-by-step equations where relevant (one transformation per line) an
           locale: params.context?.locale,
           fastResponse: true,
           explainDepth: 'short',
+          inputMode: 'voice',
         },
       });
 

@@ -123,6 +123,37 @@ describe('AiService flow guards', () => {
     expect(normalized.content.visualAid).toBeUndefined();
   });
 
+  it('supports string-based steps and splits them into separate practice items', () => {
+    const service = createService();
+    const normalized = (service as any).sanitizeStructuredTutorPayload({
+      structuredContent: {
+        steps: '1. Solve 2 + 3\n2. Find 8 ÷ 2',
+      },
+    });
+
+    expect(normalized.structuredContent.steps).toEqual(['1. Solve 2 + 3', '2. Find 8 ÷ 2']);
+  });
+
+  it('includes voice-input guidance in the system prompt', () => {
+    const service = createService();
+    const prompt = (service as any).buildTutorSystemPrompt({
+      message: 'Please provide 6 practice problems',
+      context: { learningMode: 'full_solution' },
+      effectiveContext: { grade: 'Grade 7', currentSubject: 'Math' },
+      state: { flowStep: 'PLAN' },
+      missingFields: [],
+      assumptionsUsed: [],
+      learningMode: 'full_solution',
+      explainDepth: 'normal',
+      responseLanguage: 'en',
+      languageInstruction: 'LANGUAGE: Respond only in clear British English.',
+      inputMode: 'voice',
+    });
+
+    expect(prompt).toContain('voice');
+    expect(prompt).toContain('same tutoring rules');
+  });
+
   it('detects practice intent for exercise-generation requests', () => {
     const service = createService();
     const intent = (service as any).detectTutorIntent({
