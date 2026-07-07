@@ -1982,11 +1982,13 @@ Use clear step-by-step equations where relevant (one transformation per line) an
         },
       });
 
+      // Return the full chat response so the client receives tutoringState,
+      // learningModeApplied, explainDepthApplied, progress, videoSuggestion, etc.
       return {
+        ...(chatResponse as any),
+        // ensure transcription and sessionId are present/consistent
         transcription: transcribedText,
-        message: chatResponse.message,
-        structuredContent: chatResponse.structuredContent,
-        sessionId: params.sessionId,
+        sessionId: chatResponse.sessionId || params.sessionId,
         resolvedLanguage: chatResponse.resolvedLanguage || provisionalLanguage,
       };
     } catch (error) {
