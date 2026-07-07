@@ -122,4 +122,33 @@ describe('AiService flow guards', () => {
     ]);
     expect(normalized.content.visualAid).toBeUndefined();
   });
+
+  it('detects practice intent for exercise-generation requests', () => {
+    const service = createService();
+    const intent = (service as any).detectTutorIntent({
+      message: 'Give me 5 practice problems on fractions',
+      context: { learningMode: 'full_solution' },
+    });
+
+    expect(intent).toBe('practice');
+  });
+
+  it('detects hint intent for scaffolded help requests', () => {
+    const service = createService();
+    const prompt = (service as any).buildTutorSystemPrompt({
+      message: 'Give me a hint for this algebra question',
+      context: { learningMode: 'hints' },
+      effectiveContext: { grade: 'Grade 8', currentSubject: 'Math' },
+      state: { flowStep: 'PLAN' },
+      missingFields: [],
+      assumptionsUsed: [],
+      learningMode: 'hints',
+      explainDepth: 'normal',
+      responseLanguage: 'en',
+      languageInstruction: 'LANGUAGE: Respond only in clear British English.',
+    });
+
+    expect(prompt).toContain('hint');
+    expect(prompt).toContain('scaffold');
+  });
 });
