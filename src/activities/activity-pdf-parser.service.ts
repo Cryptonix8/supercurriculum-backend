@@ -185,7 +185,7 @@ export class ActivityPdfParserService {
     const localeInstruction =
       '\n\nLANGUAGE: Write all extracted activity text (title, instructions, captions) in clear English, even if the PDF uses another language.';
 
-    this.logger.log(`Extracting activities with GPT-4 Vision from PDF (max ${maxPages} pages)...`);
+    this.logger.log(`Extracting activities with GPT-5.5 Vision from PDF (max ${maxPages} pages)...`);
 
     const pages = await this.extractScreenshotsFromPdf(pdfBuffer, {
       maxPages,
@@ -234,7 +234,7 @@ Extract ALL problems and activities visible. Return ONLY valid JSON.`,
 
       try {
         const response = await this.openai.chat.completions.create({
-          model: 'gpt-4o',
+          model: 'gpt-5.5',
           messages: [
             {
               role: 'system',
@@ -370,7 +370,7 @@ Return a comprehensive summary of the curriculum content that can be used to gen
       }
 
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o',
+        model: 'gpt-5.5',
         messages: [
           {
             role: 'system',
@@ -586,7 +586,7 @@ Return a JSON object with this structure:
 
       try {
         const response = await this.openai.chat.completions.create({
-          model: 'gpt-4o',
+          model: 'gpt-5.5',
           messages: [
             {
               role: 'system',
@@ -742,7 +742,7 @@ Return a JSON object with this structure:
         if (curriculumPdfBuffer) {
           if (options?.useVision) {
             // Use GPT-4 Vision for math formulas, graphs, diagrams
-            this.logger.log(`Using GPT-4 Vision for curriculum extraction (formulas, graphs, diagrams)`);
+            this.logger.log(`Using GPT-5.5 Vision for curriculum extraction (formulas, graphs, diagrams)`);
             const visionActivities = await this.extractActivitiesWithVisionFromPdf(curriculumPdfBuffer, yearNumber, {
               maxPages: 10,
               structureText: yearPdfText,

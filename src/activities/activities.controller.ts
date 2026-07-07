@@ -62,7 +62,7 @@ File naming:
 
 The AI uses the Year PDF for structure/style and the appropriate content source (PDF for Years 5-11, web for Years 12-13).
 
-Query params: useVision=true for GPT-4 Vision extraction (formulas, graphs, diagrams) from curriculum PDF. English curriculum only.
+Query params: useVision=true for GPT-5.5 Vision extraction (formulas, graphs, diagrams) from curriculum PDF. English curriculum only.
 
 You can upload multiple Year PDFs at once to process them in a single request.`,
   })

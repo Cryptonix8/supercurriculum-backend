@@ -86,9 +86,11 @@ export class SubmissionsService {
       },
     });
 
-    // Generate AI feedback if text content is provided
+    // Generate AI feedback if text content is provided.
+    // Threshold is intentionally low (3 chars) so that photo submissions whose
+    // textContent is the AI-generated image analysis are never silently skipped.
     let aiFeedback = null;
-    if (textContent && textContent.trim().length > 10) {
+    if (textContent && textContent.trim().length > 3) {
       try {
         aiFeedback = await this.aiService.generateFeedback({
           taskInstructions: activity.instructions,

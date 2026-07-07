@@ -80,7 +80,7 @@ export class GamificationService {
           userId,
           amount,
           reason,
-          metadata: (options.metadata ?? {}) as Prisma.InputJsonValue,
+          metadata: (options.metadata ?? {}) as any,
         },
       });
 

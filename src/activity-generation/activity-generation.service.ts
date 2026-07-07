@@ -72,7 +72,7 @@ Return as a JSON array with this structure:
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5.5',
         messages: [
           {
             role: 'system',
@@ -140,7 +140,7 @@ Return as JSON:
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5.5',
         messages: [
           {
             role: 'system',
@@ -215,7 +215,7 @@ Return as JSON:
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5.5',
         messages: [
           {
             role: 'system',
@@ -289,7 +289,7 @@ Return as JSON:
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5.5',
         messages: [
           {
             role: 'system',

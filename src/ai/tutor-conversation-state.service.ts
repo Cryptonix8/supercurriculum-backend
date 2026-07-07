@@ -66,9 +66,9 @@ export class TutorConversationStateService {
           chapter: this.normalizeString(context?.chapter),
           learningMode: this.normalizeString(context?.learningMode),
           flowStep: 'INTAKE',
-          askedFields: askedFields as Prisma.InputJsonValue,
-          answeredFields: answeredFields as Prisma.InputJsonValue,
-          assumptions: [] as Prisma.InputJsonValue,
+          askedFields: askedFields as any,
+          answeredFields: answeredFields as any,
+          assumptions: [] as any,
         },
       });
       return this.normalizeState(created);
@@ -166,10 +166,10 @@ export class TutorConversationStateService {
         ...(patch.learningMode !== undefined ? { learningMode: patch.learningMode } : {}),
         ...(patch.flowStep !== undefined ? { flowStep: patch.flowStep } : {}),
         ...(patch.askedFields !== undefined
-          ? { askedFields: patch.askedFields as Prisma.InputJsonValue }
+          ? { askedFields: patch.askedFields as any }
           : {}),
         ...(patch.answeredFields !== undefined
-          ? { answeredFields: patch.answeredFields as Prisma.InputJsonValue }
+          ? { answeredFields: patch.answeredFields as any }
           : {}),
         ...(patch.clarificationCount !== undefined
           ? { clarificationCount: patch.clarificationCount }
@@ -189,10 +189,10 @@ export class TutorConversationStateService {
           : {}),
         ...(patch.lastProgressAt !== undefined ? { lastProgressAt: patch.lastProgressAt } : {}),
         ...(patch.assumptions !== undefined
-          ? { assumptions: patch.assumptions as Prisma.InputJsonValue }
+          ? { assumptions: patch.assumptions as any }
           : {}),
         ...(patch.lastTransition !== undefined
-          ? { lastTransition: patch.lastTransition as Prisma.InputJsonValue }
+          ? { lastTransition: patch.lastTransition as any }
           : {}),
       },
     });
@@ -242,7 +242,7 @@ export class TutorConversationStateService {
     if (learningMode && learningMode !== existing.learningMode) patch.learningMode = learningMode;
 
     if (Object.keys(patch).length > 0) {
-      patch.answeredFields = answeredFields as Prisma.InputJsonValue;
+      patch.answeredFields = answeredFields as any;
     }
 
     return patch;

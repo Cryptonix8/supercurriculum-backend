@@ -151,6 +151,11 @@ export class AiController {
     @Body('yearGroup') yearGroup?: string,
     @Body('locale') locale?: string,
     @Body('preferFastResponses') preferFastResponses?: string,
+    @Body('grade') grade?: string,
+    @Body('currentSubject') currentSubject?: string,
+    @Body('chapter') chapter?: string,
+    @Body('learningMode') learningMode?: string,
+    @Body('explainDepth') explainDepth?: string,
   ) {
     if (!file) {
       throw new BadRequestException('No audio file provided');
@@ -165,7 +170,12 @@ export class AiController {
           yearGroup,
           locale,
           preferFastResponses: preferFastResponses !== 'false',
-        } as any,
+          grade,
+          currentSubject,
+          chapter,
+          learningMode: (learningMode as 'hints' | 'full_solution') || undefined,
+          explainDepth: (explainDepth as 'short' | 'normal' | 'detailed') || undefined,
+        },
       });
 
       // Clean up the uploaded file after processing

@@ -76,4 +76,50 @@ describe('AiService flow guards', () => {
 
     expect(guarded).toEqual(original);
   });
+
+  it('normalizes multiline steps and arrays into separate step items', () => {
+    const service = createService();
+    const normalized = (service as any).sanitizeStructuredTutorPayload({
+      structuredContent: {
+        steps: ['1. Add 2 and 3\n2. Subtract 1 from the result'],
+      },
+    });
+
+    expect(normalized.structuredContent.steps).toEqual([
+      '1. Add 2 and 3',
+      '2. Subtract 1 from the result',
+    ]);
+  });
+
+  it('rescues numbered problems from visualAid to steps when steps are generic', () => {
+    const service = createService();
+    const normalized = (service as any).sanitizeStructuredTutorPayload({
+      structuredContent: {
+        steps: ['Think about the method first.'],
+        visualAid: '1. Calculate 5 + 7\n2. Find the perimeter of a 3 cm square',
+      },
+    });
+
+    expect(normalized.structuredContent.steps).toEqual([
+      'Think about the method first.',
+      '1. Calculate 5 + 7',
+      '2. Find the perimeter of a 3 cm square',
+    ]);
+    expect(normalized.structuredContent.visualAid).toBeUndefined();
+  });
+
+  it('rescues numbered problems from visualAid during structured content normalization', () => {
+    const service = createService();
+    const normalized = (service as any).normalizeStructuredContent({
+      steps: ['Think about the method first.'],
+      visualAid: '1. Calculate 5 + 7\n2. Find the perimeter of a 3 cm square',
+    });
+
+    expect(normalized.content.steps).toEqual([
+      'Think about the method first.',
+      '1. Calculate 5 + 7',
+      '2. Find the perimeter of a 3 cm square',
+    ]);
+    expect(normalized.content.visualAid).toBeUndefined();
+  });
 });

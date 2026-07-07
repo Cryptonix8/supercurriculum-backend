@@ -243,7 +243,7 @@ All 6 tools are defined in `agent-functions.config.ts` and can be used with:
 import { AGENT_FUNCTIONS } from './agent-functions.config';
 
 const response = await openai.chat.completions.create({
-  model: 'gpt-4o',
+  model: 'gpt-5.5',
   messages: [...],
   functions: AGENT_FUNCTIONS,
   function_call: 'auto'

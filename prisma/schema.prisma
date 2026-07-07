@@ -752,7 +752,7 @@ model CustomAssignment {
   // AI-Generated Content
   content         Json // Stores the generated questions/content
   generatedAt     DateTime @default(now())
-  generationModel String? // e.g., "gpt-4", "claude-3"
+  generationModel String? // e.g., "gpt-5.5", "claude-3"
 
   // Metadata
   status      AssignmentStatus     @default(DRAFT)

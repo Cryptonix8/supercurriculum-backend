@@ -589,7 +589,7 @@ Extract ALL topics you can identify. Be comprehensive.`;
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o',
+        model: 'gpt-5.5',
         messages: [
           {
             role: 'system',

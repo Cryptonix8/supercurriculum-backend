@@ -1054,7 +1054,7 @@ IMPORTANT RULES:
 10. Handle multi-line questions correctly - combine continuation lines into the question text`;
 
         const response = await this.openai.chat.completions.create({
-          model: 'gpt-4o',
+          model: 'gpt-5.5',
           messages: [
             {
               role: 'system',

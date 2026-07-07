@@ -41,10 +41,10 @@ export class TutorSpeechDto {
   @IsIn(['hints', 'full_solution'])
   learningMode?: 'hints' | 'full_solution';
 
-  @ApiPropertyOptional({ enum: ['alloy', 'verse', 'aria'], default: 'alloy' })
+  @ApiPropertyOptional({ enum: ['alloy', 'nova', 'coral', 'sage', 'echo'], default: 'alloy' })
   @IsOptional()
-  @IsIn(['alloy', 'verse', 'aria'])
-  voice?: 'alloy' | 'verse' | 'aria';
+  @IsIn(['alloy', 'nova', 'coral', 'sage', 'echo', 'verse', 'aria'])
+  voice?: 'alloy' | 'verse' | 'aria' | 'nova' | 'coral' | 'sage' | 'echo';
 
   @ApiPropertyOptional({ example: 1.0, minimum: 0.8, maximum: 1.2, default: 1.0 })
   @IsOptional()

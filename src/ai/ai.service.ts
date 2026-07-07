@@ -12,9 +12,17 @@ import {
   TutorFlowStep,
   TutorMissingField,
 } from './tutor-conversation-state.service';
+import {
+  OPENAI_CHAT_MODEL,
+  OPENAI_TTS_MODELS,
+  OPENAI_WHISPER_MODEL,
+  OPENAI_WHISPER_FALLBACK_MODEL,
+  OpenAiTtsVoice,
+  resolveOpenAiTtsVoice,
+} from './ai-models';
 
 /** Bump when tutor system prompt or structured response contract in `chat()` changes materially (simulation baselines / regression tracking). */
-export const AI_TUTOR_PROMPT_VERSION = '2026.05.06';
+export const AI_TUTOR_PROMPT_VERSION = '2026.05.11';
 
 /** Tutor replies are always in English regardless of app UI locale. */
 const TUTOR_RESPONSE_LOCALE_FOR_QUALITY = 'en-GB';
@@ -23,6 +31,9 @@ interface StructuredTutorContent {
   plan?: string;
   hints?: string[];
   steps?: string[];
+  examples?: string[];
+  exercise?: string;
+  exerciseAnswers?: string;
   finalAnswer?: string;
   quickCheck?: string;
   commonMistakes?: string[];
@@ -110,7 +121,7 @@ Write entirely in English, friendly and encouraging, age-appropriate.`;
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: OPENAI_CHAT_MODEL,
         messages: [
           {
             role: 'system',
@@ -166,6 +177,17 @@ Write entirely in English, friendly and encouraging, age-appropriate.`;
       grade: 'grade',
       subject: 'subject/topic',
     };
+
+    // Enforce English-only student input: translate the incoming message to English
+    // before it is stored, passed to the AI, or reflected back in the UI.
+    // Skip when the caller has already ensured English (e.g. voice pipeline where
+    // Whisper already transcribed with language:'en' — re-running translation adds
+    // latency and the 512-token cap can silently truncate long transcriptions).
+    const skipTranslation = Boolean((params.context as any)?._skipTranslation);
+    const translatedUserMessage = skipTranslation
+      ? params.message
+      : await this.translateToEnglish(params.message);
+    params = { ...params, message: translatedUserMessage };
 
     const state = await this.tutorConversationState.loadOrCreateState({
       userId: params.userId,
@@ -319,6 +341,7 @@ Write entirely in English, friendly and encouraging, age-appropriate.`;
         learningModeApplied: learningMode,
         explainDepthApplied: explainDepth,
         sessionId: params.sessionId,
+        translatedUserMessage,
         tutoringState: {
           flowStep: updatedState.flowStep,
           grade: updatedState.grade || undefined,
@@ -343,98 +366,381 @@ Write entirely in English, friendly and encouraging, age-appropriate.`;
       orderBy: { createdAt: 'asc' },
       take: preferFastResponses ? 6 : 10,
     });
+    
+const languageInstruction =
+  '\n\nLANGUAGE: You must reply only in English in every field (message and structuredContent). Use fluent, natural British or international classroom English. All explanations, questions, hints, summaries, exercises and feedback must be written in English. Both user input and assistant output must be treated as English-only communication. If the user writes in any other language, internally translate it and respond only in English without repeating or mirroring the original language. Never output non-English text under any circumstance.';
 
-    const languageInstruction =
-      '\n\nLANGUAGE: You must reply only in English in every field (message and structuredContent): explanations, prompts, hints, checks, and recaps must be fluent, clear British or international classroom English.';
+const systemPrompt = `You are an expert AI teacher and personal tutor helping a ${effectiveContext?.yearGroup || ''} student learn effectively.
 
-    // Build system prompt with context
-    const systemPrompt = `You are a friendly, supportive AI tutor helping a ${effectiveContext?.yearGroup || ''} student with their studies.
+Your goal is not only to answer questions, but to teach students so they truly understand the topic.
 
-Your role:
-- Answer questions clearly and simply
-- Guide students to find answers themselves rather than just giving them
-- Be encouraging and maintain a growth mindset
-- Keep responses concise (2-4 sentences usually)
-- Use age-appropriate language
-- If the student's question is unclear, ambiguous, or missing key details, ask at most 1 short clarification question only when absolutely needed.
-- Do not guess the student's intent when multiple interpretations are possible.
-- Follow this strict tutoring flow and keep moving forward: understand -> clarify (once) -> plan -> teach -> check -> summarize.
-- Never re-ask grade or subject if they are already known in the provided context.
-- If key details are still missing after one ask, proceed with explicit assumptions and provide the next actionable step.
+==================================================
+GENERAL BEHAVIOUR
+==================================================
 
-IMPORTANT - Math Equations:
-- When writing mathematical equations, formulas, or expressions, wrap them in LaTeX format using double dollar signs: $$equation$$
-- For inline math, use single dollar signs: $equation$
-- Examples:
-  - Quadratic formula: $$x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$$
-  - Simple equation: $2x + 5 = 13$
-  - Fractions: $\\frac{3}{4}$ or $\\frac{a}{b}$
-  - Powers: $x^2$ or $2^{10}$
-  - Square roots: $\\sqrt{16} = 4$
-- Always use proper LaTeX notation for all mathematical expressions
+- Be friendly, encouraging and supportive.
+- Use positive reinforcement.
+- Adapt explanations to the student's age and grade.
+- Explain concepts before giving answers whenever appropriate.
+- Guide students to think instead of simply providing answers.
+- Never make students feel embarrassed for making mistakes.
+- Maintain a growth mindset.
 
-IMPORTANT - Equation Presentation Style:
-- Start with a short line explaining what is being solved.
-- Show one transformation per line (no large jumps).
-- Keep steps ordered and readable for school students.
-- Clearly mark the final answer on its own line.
-- Add a quick check line when useful (substitution or sanity check).
+==================================================
+TEACHING FLOW
+==================================================
 
-IMPORTANT - Diagrams (Tier 1 text-based required when visuals are needed):
-- If a question needs a diagram/graph/circuit/geometry sketch, explicitly say what you will provide.
-- Provide a text-based diagram using structured points/lines/angles/relationships.
-- For graphs, include a small value table + key points (intercepts/vertex/turning point) + shape description.
-- Ask at most 1-2 targeted clarification questions only if critical data is missing.
-- Pair every text-based diagram with a short reasoning line: "From the diagram, we see..., therefore..."
+Always follow this teaching process:
 
-Current subject focus: ${effectiveContext?.currentSubject || 'General'}
-Current chapter focus: ${effectiveContext?.chapter || 'Not specified'}
-Current grade context: ${effectiveContext?.grade || effectiveContext?.yearGroup || 'Not specified'}
-Learning mode: ${learningMode}
-Explain depth: ${explainDepth}
-Current flow step: ${state.flowStep}
-Known missing fields: ${missingFields.join(', ') || 'none'}
-Assumptions to use if needed: ${assumptionsUsed.join(' | ') || 'none'}
+1. Understand the student's request.
+2. Ask ONE clarification question only if absolutely necessary.
+3. Make reasonable assumptions if information is still missing.
+4. Explain the concept.
+5. Give examples.
+6. Guide the student.
+7. Provide practice.
+8. Check understanding.
+9. Summarise key learning points.
+
+Never ask the same clarification twice.
+
+Never repeatedly ask for:
+- grade
+- year
+- subject
+- chapter
+
+if they already exist in the provided context.
+
+==================================================
+LANGUAGE RULES (STRICT ENFORCEMENT)
+==================================================
+
+- All communication MUST be in English only.
+- Both user input and assistant output must be treated as English-only communication.
+- If the user writes in any other language, you must translate it internally and respond only in English.
+- Never repeat, quote, or mirror non-English text in responses.
+- Do not include any non-English words, characters, or sentences in any field.
+- This rule applies to message, structuredContent, examples, explanations, and all outputs without exception.
+
+==================================================
+LESSON GENERATION
+==================================================
+
+If the student asks to learn a topic, teach a lesson.
+
+The lesson should include:
+
+1. Topic introduction
+2. Clear explanation
+3. Important rules
+4. Real-life examples
+5. Common mistakes
+6. Practice exercise
+7. Answer key or quick check
+8. One sentence recap
+
+Unless the student specifically requests a short answer, do NOT limit lessons to only a few sentences.
+
+==================================================
+EXERCISES AND PROBLEM LISTS
+==================================================
+
+Whenever appropriate, create exercises.
+
+Possible exercise types:
+
+- Fill in the blanks
+- Multiple choice
+- True / False
+- Matching
+- Short answer
+- Word problems
+- Speaking practice
+- Writing practice
+
+Difficulty should match:
+
+${effectiveContext?.grade || effectiveContext?.yearGroup || "student level"}
+
+==================================================
+CRITICAL FIELD MAPPING RULES
+==================================================
+
+RULE A — PRACTICE PROBLEMS REQUEST
+When the student asks for practice problems, practice questions, exercises,
+or anything similar (e.g. "give me problems", "I want to practice",
+"show me some questions", "provide problems to work on"):
+
+- Use the "steps" array to deliver every problem.
+- Each element of "steps" must be ONE complete, non-empty practice problem
+  including its full question text.
+  Example element: "1. Calculate 347 + 289."
+  Example element: "3. A bag has 48 sweets shared equally among 6 children. How many does each child get?"
+- NEVER leave a steps element empty or as just a number like "1." with no text.
+- NEVER use "visualAid" to list practice problems.
+- NEVER put the problems inside the "message" field.
+- The "message" field must only be a short intro sentence,
+  e.g. "Here are 6 practice problems for you:"
+- Do NOT put all problems in a single "exercise" string.
+- Do NOT refuse or ask for clarification — generate them immediately.
+- Always generate the exact number requested. If none specified, generate 3.
+
+RULE B — LESSON / EXPLANATION REQUEST
+When the student asks for an explanation or lesson:
+- Use "plan" for the outline.
+- Use "steps" for the step-by-step explanation (methodology steps, NOT problems).
+- Use "exercise" for a single follow-up practice question at the end.
+- Use "examples" for worked examples.
+- Use "recap" for the summary.
+- Use "visualAid" ONLY for a text-based diagram, table, or formula reference —
+  never for a list of numbered problems.
+
+==================================================
+HINT MODE
+==================================================
+
+If learning mode is "hints":
+
+- Never immediately reveal the full answer.
+- Give progressively stronger hints.
+- Encourage the student to solve it independently.
+
+==================================================
+FULL SOLUTION MODE
+==================================================
+
+If learning mode is "full_solution":
+
+Always provide:
+
+- explanation
+- working
+- reasoning
+- final answer
+- quick check
+
+==================================================
+MATHEMATICS
+==================================================
+
+Use LaTeX for ALL mathematical notation.
+
+Display equations using:
+
+$$equation$$
+
+Inline equations:
+
+$equation$
+
+Examples:
+
+$$x=\\frac{-b\\pm\\sqrt{b^2-4ac}}{2a}$$
+
+$$2x+5=13$$
+
+$$\\sqrt{16}=4$$
+
+Always:
+
+- explain what is being solved
+- show one transformation per line
+- avoid skipping steps
+- highlight the final answer
+- include a quick verification whenever possible
+
+==================================================
+DIAGRAMS
+==================================================
+
+When diagrams would improve understanding:
+
+Provide text-based diagrams.
+
+Examples:
+
+- geometry
+- graphs
+- circuits
+- maps
+- timelines
+- flowcharts
+
+For graphs include:
+
+- value table
+- intercepts
+- turning point
+- graph shape
+
+Then explain:
+
+"From the diagram we can see..."
+
+==================================================
+SCIENCE
+==================================================
+
+For science questions:
+
+Explain:
+
+- why
+- how
+- real-world application
+
+Avoid only giving definitions.
+
+==================================================
+LANGUAGES
+==================================================
+
+For language learning:
+
+Include:
+
+- examples
+- pronunciation tips (if useful)
+- grammar explanation
+- vocabulary
+- short exercise
+
+==================================================
+PROGRAMMING
+==================================================
+
+When teaching programming:
+
+Explain:
+
+- concept
+- syntax
+- code
+- expected output
+- common mistakes
+
+Never provide code without explanation unless explicitly requested.
+
+==================================================
+YOUTUBE / EXTERNAL LINKS
+==================================================
+
+IMPORTANT:
+
+Never invent:
+
+- YouTube URLs
+- website URLs
+- article links
+- video links
+
+If the application has supplied search results:
+
+Recommend ONLY those results.
+
+If no search results were supplied:
+
+Say:
+
+"I can't search YouTube directly, but I recommend searching for: '<recommended search query>'."
+
+Never fabricate URLs.
+
+==================================================
+CURRENT CONTEXT
+==================================================
+
+Subject:
+${effectiveContext?.currentSubject || 'General'}
+
+Chapter:
+${effectiveContext?.chapter || 'Not specified'}
+
+Grade:
+${effectiveContext?.grade || effectiveContext?.yearGroup || 'Not specified'}
+
+Learning Mode:
+${learningMode}
+
+Explain Depth:
+${explainDepth}
+
+Current Flow:
+${state.flowStep}
+${state.flowStep === 'WRAP_UP' ? '\nIMPORTANT: The current flow is WRAP_UP but the student has sent a NEW message. Treat this as the start of a fresh request. Respond fully and completely to whatever the student just asked — do NOT summarise or close off the session. Provide full structured content (steps, examples, plan, etc.) as appropriate.' : ''}
+
+Known Missing Fields:
+${missingFields.join(', ') || 'none'}
+
+Assumptions:
+${assumptionsUsed.join(' | ') || 'none'}
 
 ${EDUCATION_LEVELS_FOR_AI}
 
-Response contract (REQUIRED):
-- Return valid JSON only.
-- Use this exact shape:
+==================================================
+RESPONSE FORMAT
+==================================================
+
+Return VALID JSON ONLY.
+
+Do NOT return markdown.
+
+Do NOT return code fences.
+
+Return exactly this structure:
+
 {
-  "message": "concise natural-language answer text",
+  "message": "...",
   "structuredContent": {
-    "plan": "short plan",
-    "hints": ["hint 1", "hint 2"],
-    "steps": ["step 1", "step 2"],
-    "finalAnswer": "final answer line",
-    "quickCheck": "short check",
-    "commonMistakes": ["mistake 1", "mistake 2"],
-    "recap": "one-line recap",
-    "visualAid": "optional text diagram or graph guidance"
+    "plan": "...",
+    "hints": [],
+    "steps": [],
+    "examples": [],
+    "exercise": "...",
+    "exerciseAnswers": "...",
+    "finalAnswer": "...",
+    "quickCheck": "...",
+    "commonMistakes": [],
+    "recap": "...",
+    "visualAid": "..."
   }
 }
-- Keep all fields optional except "message" and "structuredContent", but prefer filling most of them when useful.
-- If learning mode is "hints", prioritize plan + hints and keep finalAnswer concise.
-- If learning mode is "full_solution", include clear steps and finalAnswer.
+
+Rules:
+
+- message is REQUIRED.
+- structuredContent is REQUIRED.
+- All other fields are optional.
+- Populate as many fields as are useful.
+- Use examples whenever teaching.
+- Include exercises whenever teaching.
+- Include recap whenever possible.
+- Include common mistakes whenever appropriate.
+- If learning mode is "hints", prioritise hints over answers.
+- If learning mode is "full_solution", include full working.
 - Respect explain depth:
-  - short: compact and minimal
-  - normal: balanced detail
-  - detailed: richer explanation with extra reasoning
-- Keep equations in LaTeX format exactly as specified above.${languageInstruction}`;
+  - short
+  - normal
+  - detailed
+
+${languageInstruction}`;
 
     // Build messages array
     const messages: any[] = [
       { role: 'system', content: systemPrompt },
     ];
 
-    // Add history
+    // Add history — strip any message (user OR assistant) that contains non-Latin
+    // script so a previous bad transcription or foreign-language reply never
+    // anchors GPT to respond in a non-English language.
     history.forEach((msg) => {
       if (msg.role === 'USER') {
-        messages.push({ role: 'user', content: msg.content });
+        if (!this.containsNonLatinScript(msg.content || '')) {
+          messages.push({ role: 'user', content: msg.content });
+        }
       } else if (msg.role === 'ASSISTANT') {
-        // Do not feed back non-English assistant history; it can anchor future replies in Greek.
-        if (!this.containsGreekScript(msg.content || '')) {
+        if (!this.containsNonLatinScript(msg.content || '')) {
           messages.push({ role: 'assistant', content: msg.content });
         }
       }
@@ -445,35 +751,49 @@ Response contract (REQUIRED):
 
     try {
       let { parsed, tokenCount } = await this.requestStructuredTutorCompletion(messages, {
-        maxTokens: preferFastResponses ? 520 : 900,
+        // Fast mode: raised from 1 500 → 3 000 so that six math problems with
+        // working are never silently truncated mid-JSON (truncation causes the
+        // entire structuredContent to be lost and problems become invisible).
+        // Normal mode: 3 500 for detailed explanations.
+        // Voice messages are transcribed text and tend to be verbose; the
+        // resulting JSON (6 problems + Plan + Steps + Recap + Visual Aid) can
+        // approach or exceed 3 000 tokens.  Use 4 000 as the primary ceiling so
+        // that valid responses are never silently truncated mid-JSON.
+        maxTokens: preferFastResponses ? 4000 : 4500,
         temperature: preferFastResponses ? 0.7 : 0.8,
       });
       let { filtered, quality } = this.applyTutorQualityFilter(parsed, TUTOR_RESPONSE_LOCALE_FOR_QUALITY);
-      if (this.containsGreekScript(this.collectTutorResponseText(filtered))) {
+      if (this.containsNonLatinScript(this.collectTutorResponseText(filtered))) {
         quality.lowQuality = true;
         if (!quality.issues.includes('non_english_script_presence')) {
           quality.issues.push('non_english_script_presence');
         }
       }
 
+      // Only attempt a repair pass when non-Latin script is actually present.
+      // Do NOT repair for other quality issues (mixed_script_tokens, encoding
+      // artefacts) because the repair pass has a small token budget (3 000) and
+      // would silently truncate a valid 7-problem response, discarding all content.
       const shouldRepairLowQuality =
-        quality.lowQuality &&
-        (!preferFastResponses || quality.issues.includes('non_english_script_presence'));
+        quality.issues.includes('non_english_script_presence') ||
+        quality.issues.includes('suspicious_encoding');
       if (shouldRepairLowQuality) {
         const repairInstruction =
-          'Rewrite your previous answer in clear, natural English only. Translate every Greek/non-English part into English and remove all non-Latin script. If something is missing, ask one short clarification question instead of inventing terms. Return only valid JSON in the same shape.';
+          'Rewrite your previous answer in clear, natural English only. Translate every non-English part into English and remove all non-Latin script. Keep ALL problems, steps and content intact. Return only valid JSON in the same shape.';
         const retry = await this.requestStructuredTutorCompletion([
           ...messages,
           { role: 'user', content: repairInstruction },
         ], {
-          maxTokens: preferFastResponses ? 420 : 700,
-          temperature: 0.6,
+          // Repair pass must have the same headroom as the primary call so that
+          // a 7-problem answer is never truncated during translation.
+          maxTokens: preferFastResponses ? 4000 : 4500,
+          temperature: 0.5,
         });
         tokenCount += retry.tokenCount;
         const retried = this.applyTutorQualityFilter(retry.parsed, TUTOR_RESPONSE_LOCALE_FOR_QUALITY);
         filtered = retried.filtered;
         quality = retried.quality;
-        if (this.containsGreekScript(this.collectTutorResponseText(filtered))) {
+        if (this.containsNonLatinScript(this.collectTutorResponseText(filtered))) {
           quality.lowQuality = true;
           if (!quality.issues.includes('non_english_script_presence')) {
             quality.issues.push('non_english_script_presence');
@@ -481,7 +801,11 @@ Response contract (REQUIRED):
         }
       }
 
-      if (quality.lowQuality) {
+      // Only replace the response with a fallback clarification when non-Latin
+      // script is still present after the repair pass.  Do NOT replace for
+      // mixed_script_tokens or encoding issues alone — those rarely affect
+      // readability and the original content should be shown as-is.
+      if (quality.issues.includes('non_english_script_presence') && quality.lowQuality) {
         filtered = {
           message:
             'Which part are you stuck on? A bit more detail will help me give clear, step-by-step help.',
@@ -626,6 +950,7 @@ Response contract (REQUIRED):
         learningModeApplied: learningMode,
         explainDepthApplied: explainDepth,
         sessionId: params.sessionId,
+        translatedUserMessage,
         tutoringState: {
           flowStep: updatedState.flowStep,
           grade: updatedState.grade || undefined,
@@ -918,11 +1243,18 @@ Use clear step-by-step equations where relevant (one transformation per line) an
       ];
 
       // Add recent history for context
+      // Strip any history message containing non-Latin script — same guard as the
+      // main chat path — so a previous bad voice transcription never anchors the
+      // image-message response in a foreign language.
       history.forEach((msg) => {
         if (msg.role === 'USER') {
-          messages.push({ role: 'user', content: msg.content });
+          if (!this.containsNonLatinScript(msg.content || '')) {
+            messages.push({ role: 'user', content: msg.content });
+          }
         } else if (msg.role === 'ASSISTANT') {
-          messages.push({ role: 'assistant', content: msg.content });
+          if (!this.containsNonLatinScript(msg.content || '')) {
+            messages.push({ role: 'assistant', content: msg.content });
+          }
         }
       });
 
@@ -960,21 +1292,21 @@ Use clear step-by-step equations where relevant (one transformation per line) an
 
       // Call GPT-4o Vision
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o', // GPT-4o has vision capabilities
+        model: OPENAI_CHAT_MODEL,
         messages,
         temperature: 0.7,
         max_tokens: 1000,
       });
 
       let aiResponse = response.choices[0].message.content || '';
-      if (this.containsGreekScript(aiResponse)) {
+      if (this.containsNonLatinScript(aiResponse)) {
         const englishRewrite = await this.openai.chat.completions.create({
-          model: 'gpt-4o-mini',
+          model: OPENAI_CHAT_MODEL,
           messages: [
             {
               role: 'system',
               content:
-                'Convert the given tutor response to clear English only. Keep the educational meaning and remove all Greek/non-Latin script.',
+                'Convert the given tutor response to clear English only. Keep the educational meaning and remove all non-Latin script.',
             },
             {
               role: 'user',
@@ -1052,6 +1384,36 @@ Use clear step-by-step equations where relevant (one transformation per line) an
     return mimeTypes[ext || ''] || 'image/jpeg';
   }
 
+  /**
+   * Translates arbitrary text to English using a lightweight GPT call.
+   * If the text is already English (or the translation call fails), the
+   * original text is returned unchanged so the pipeline is never blocked.
+   */
+  private async translateToEnglish(text: string): Promise<string> {
+    if (!this.openai || !text?.trim()) return text;
+    try {
+      const result = await this.openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a translation assistant. If the text is already in English, return it exactly as-is. ' +
+              'If it is in any other language, translate it to fluent English. ' +
+              'Return ONLY the translated (or original) text — no explanation, no prefix, no quotes.',
+          },
+          { role: 'user', content: text },
+        ],
+        temperature: 0,
+        max_tokens: 512,
+      });
+      return result.choices[0].message.content?.trim() || text;
+    } catch {
+      // Never block the pipeline on a translation failure.
+      return text;
+    }
+  }
+
   private hashTutorText(value: string): string {
     const normalized = (value || '')
       .toLowerCase()
@@ -1104,6 +1466,9 @@ Use clear step-by-step equations where relevant (one transformation per line) an
     if (content.quickCheck) return 'CHECK';
     if (content.steps?.length || content.finalAnswer) return 'TEACH';
     if (content.plan) return 'PLAN';
+    // Exercise, examples, and visualAid are teaching content — treat as TEACH
+    // so the flow machine doesn't loop back to CLARIFY when problems are delivered.
+    if (content.exercise || content.examples?.length || content.visualAid || content.exerciseAnswers) return 'TEACH';
     return 'CLARIFY';
   }
 
@@ -1131,13 +1496,33 @@ Use clear step-by-step equations where relevant (one transformation per line) an
     const text = (response.message || '').toLowerCase();
     const repeatedKnownFieldAsk = this.detectRepeatedKnownFieldAsk(response.message, state) > 0;
     const asksForExerciseAgain = /send the exercise|στείλε την άσκηση|i need the exercise/.test(text);
+    // hasProgress must cover ALL content-bearing fields.
+    // Previously it only checked plan/steps/hints/quickCheck, so a response that
+    // contained ONLY exercises, examples, finalAnswer, recap or visualAid was
+    // treated as "no progress" and the entire AI answer was silently replaced with
+    // the forward-progress fallback — making all problems invisible.
     const hasProgress =
       Boolean(response.structuredContent.plan) ||
       Boolean(response.structuredContent.steps?.length) ||
       Boolean(response.structuredContent.hints?.length) ||
-      Boolean(response.structuredContent.quickCheck);
+      Boolean(response.structuredContent.quickCheck) ||
+      Boolean(response.structuredContent.exercise) ||
+      Boolean(response.structuredContent.examples?.length) ||
+      Boolean(response.structuredContent.exerciseAnswers) ||
+      Boolean(response.structuredContent.finalAnswer) ||
+      Boolean(response.structuredContent.recap) ||
+      Boolean(response.structuredContent.visualAid) ||
+      Boolean(response.structuredContent.commonMistakes?.length);
 
-    if (!repeatedKnownFieldAsk && !asksForExerciseAgain && (hasProgress || state.flowStep === 'CLARIFY')) {
+    // Always pass through when the AI produced real content (steps, plan, hints, etc.).
+    // repeatedKnownFieldAsk must NOT discard a response that has actual content —
+    // e.g. "give me practice problems on this topic" contains "topic" which would
+    // previously trigger repeatedKnownFieldAsk and silently replace all problems
+    // with the generic fallback text.
+    if (hasProgress) {
+      return response;
+    }
+    if (!repeatedKnownFieldAsk && !asksForExerciseAgain && state.flowStep === 'CLARIFY') {
       return response;
     }
 
@@ -1236,16 +1621,56 @@ Use clear step-by-step equations where relevant (one transformation per line) an
 
   private sanitizeStructuredTutorPayload(payload: any): StructuredTutorResponse {
     const sectionSource = payload?.structuredContent || payload || {};
+
+    const steps = this.toStringArray(sectionSource.steps);
+    let visualAid = typeof sectionSource.visualAid === 'string' ? sectionSource.visualAid : undefined;
+
+    // ── Rescue: GPT sometimes puts practice problems in visualAid as a
+    //    numbered string ("1. Calculate…\n2. Solve…\n…") instead of putting
+    //    them in the steps array.  Detect this pattern and move the items to
+    //    steps so they render as individual problem cards.
+    //    We only do this when steps is absent or contains only generic
+    //    methodology phrases (no actual problems), so we never clobber real steps.
+    if (visualAid) {
+      const visualLines = visualAid
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
+      const isNumberedProblemList =
+        visualLines.length >= 2 &&
+        visualLines.filter((l) => /^\d+[\.\)]\s+\S/.test(l)).length >= Math.floor(visualLines.length * 0.6);
+
+      if (isNumberedProblemList) {
+        const rescuedProblems = visualLines.filter((l) => /^\d+[\.\)]\s+\S/.test(l));
+        // Only replace steps if current steps look generic (no arithmetic or
+        // question marks) or are absent.
+        const stepsLookGeneric =
+          !steps?.length ||
+          steps.every((s) => !/\d/.test(s) && !s.includes('?'));
+        if (stepsLookGeneric) {
+          this.logger.warn(
+            `[sanitize] Rescuing ${rescuedProblems.length} problems from visualAid → steps`,
+          );
+          steps.push(...rescuedProblems);
+          visualAid = undefined;
+        }
+      }
+    }
+
     const structuredContent: StructuredTutorContent = {
       plan: typeof sectionSource.plan === 'string' ? sectionSource.plan : undefined,
       hints: this.toStringArray(sectionSource.hints),
-      steps: this.toStringArray(sectionSource.steps),
+      steps,
+      examples: this.toStringArray(sectionSource.examples),
+      exercise: typeof sectionSource.exercise === 'string' ? sectionSource.exercise : undefined,
+      exerciseAnswers:
+        typeof sectionSource.exerciseAnswers === 'string' ? sectionSource.exerciseAnswers : undefined,
       finalAnswer:
         typeof sectionSource.finalAnswer === 'string' ? sectionSource.finalAnswer : undefined,
       quickCheck: typeof sectionSource.quickCheck === 'string' ? sectionSource.quickCheck : undefined,
       commonMistakes: this.toStringArray(sectionSource.commonMistakes),
       recap: typeof sectionSource.recap === 'string' ? sectionSource.recap : undefined,
-      visualAid: typeof sectionSource.visualAid === 'string' ? sectionSource.visualAid : undefined,
+      visualAid,
     };
 
     return {
@@ -1259,6 +1684,9 @@ Use clear step-by-step equations where relevant (one transformation per line) an
     if (structuredContent.plan) segments.push(`Plan: ${structuredContent.plan}`);
     if (structuredContent.hints?.length) segments.push(`Hints: ${structuredContent.hints.join(' ')}`);
     if (structuredContent.steps?.length) segments.push(`Steps: ${structuredContent.steps.join(' ')}`);
+    if (structuredContent.examples?.length) segments.push(`Examples: ${structuredContent.examples.join(' ')}`);
+    if (structuredContent.exercise) segments.push(`Exercise: ${structuredContent.exercise}`);
+    if (structuredContent.exerciseAnswers) segments.push(`Answers: ${structuredContent.exerciseAnswers}`);
     if (structuredContent.finalAnswer) segments.push(`Final answer: ${structuredContent.finalAnswer}`);
     if (structuredContent.quickCheck) segments.push(`Quick check: ${structuredContent.quickCheck}`);
     if (structuredContent.commonMistakes?.length) {
@@ -1275,17 +1703,42 @@ Use clear step-by-step equations where relevant (one transformation per line) an
     parsed: StructuredTutorResponse;
     tokenCount: number;
   }> {
+    const maxTokens = options?.maxTokens ?? 2500;
     const response = await this.openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: OPENAI_CHAT_MODEL,
       messages,
       temperature: options?.temperature ?? 0.8,
-      max_tokens: options?.maxTokens ?? 900,
+      // Raised from 520/900: six math problems with working need ~2 000 tokens.
+      // A truncated JSON response silently discards all content after the cut-off.
+      max_tokens: maxTokens,
       response_format: { type: 'json_object' },
     });
-    const aiResponse = response.choices[0].message.content || '';
+
+    const choice = response.choices[0];
+    let aiResponse = choice.message.content || '';
+    let tokenCount = response.usage?.total_tokens || 0;
+
+    // If the model hit the token limit mid-JSON the output is incomplete and
+    // cannot be parsed.  Retry once with a higher ceiling rather than silently
+    // returning an empty structuredContent to the student.
+    if (choice.finish_reason === 'length') {
+      this.logger.warn(
+        `[requestStructuredTutorCompletion] finish_reason=length at max_tokens=${maxTokens}; retrying with ${maxTokens + 1500} tokens`,
+      );
+      const retry = await this.openai.chat.completions.create({
+        model: OPENAI_CHAT_MODEL,
+        messages,
+        temperature: options?.temperature ?? 0.8,
+        max_tokens: maxTokens + 1500,
+        response_format: { type: 'json_object' },
+      });
+      aiResponse = retry.choices[0].message.content || '';
+      tokenCount += retry.usage?.total_tokens || 0;
+    }
+
     return {
       parsed: this.buildStructuredTutorFallback(aiResponse),
-      tokenCount: response.usage?.total_tokens || 0,
+      tokenCount,
     };
   }
 
@@ -1305,6 +1758,9 @@ Use clear step-by-step equations where relevant (one transformation per line) an
       filtered.structuredContent.plan,
       ...(filtered.structuredContent.hints || []),
       ...(filtered.structuredContent.steps || []),
+      ...(filtered.structuredContent.examples || []),
+      filtered.structuredContent.exercise,
+      filtered.structuredContent.exerciseAnswers,
       filtered.structuredContent.finalAnswer,
       filtered.structuredContent.quickCheck,
       ...(filtered.structuredContent.commonMistakes || []),
@@ -1342,6 +1798,9 @@ Use clear step-by-step equations where relevant (one transformation per line) an
         plan: normalize(structuredContent.plan),
         hints: normalizeArray(structuredContent.hints),
         steps: normalizeArray(structuredContent.steps),
+        examples: normalizeArray(structuredContent.examples),
+        exercise: normalize(structuredContent.exercise),
+        exerciseAnswers: normalize(structuredContent.exerciseAnswers),
         finalAnswer: normalize(structuredContent.finalAnswer),
         quickCheck: normalize(structuredContent.quickCheck),
         commonMistakes: normalizeArray(structuredContent.commonMistakes),
@@ -1368,7 +1827,7 @@ Use clear step-by-step equations where relevant (one transformation per line) an
     const issues: string[] = [];
     let score = 100;
 
-    const suspiciousMatches = text.match(/\uFFFD|Ã|Î|Ï|Ð|Ñ|â€™|â€œ|â€\x9d|â€”|â€“/g) || [];
+    const suspiciousMatches = text.match(/\uFFFD|Ã|Î|Ï|Ð|Ñ|â€™|â€œ|â€\x9d|â€"|â€"/g) || [];
     if (suspiciousMatches.length > 0) {
       issues.push('suspicious_encoding');
       score -= 35;
@@ -1383,8 +1842,9 @@ Use clear step-by-step equations where relevant (one transformation per line) an
     const tutorExpectsEnglish = !locale || locale === TUTOR_RESPONSE_LOCALE_FOR_QUALITY || /^en/i.test(locale);
     if (tutorExpectsEnglish) {
       const letterCount = (text.match(/\p{L}/gu) || []).length;
-      const greekRatio = this.computeGreekCharacterRatio(text);
-      if (letterCount >= 40 && greekRatio > 0.4) {
+      // Check ANY non-Latin, non-Common script — not just Greek.
+      const nonLatinRatio = this.computeNonLatinCharacterRatio(text);
+      if (letterCount >= 40 && nonLatinRatio > 0.4) {
         issues.push('dominant_non_english_script');
         score -= 28;
       }
@@ -1410,17 +1870,29 @@ Use clear step-by-step equations where relevant (one transformation per line) an
   private extractMixedScriptTokens(text: string): string[] {
     const tokens = text.match(/[\p{L}\p{M}\p{Nd}_-]{2,}/gu) || [];
     return tokens.filter((token) => {
-      let hasGreek = false;
+      let hasNonLatin = false;
       let hasLatin = false;
       for (const char of token) {
-        if (/\p{Script=Greek}/u.test(char)) hasGreek = true;
         if (/\p{Script=Latin}/u.test(char)) hasLatin = true;
-        if (hasGreek && hasLatin) return true;
+        else if (/\p{L}/u.test(char)) hasNonLatin = true;
+        if (hasNonLatin && hasLatin) return true;
       }
       return false;
     });
   }
 
+  /**
+   * Returns the ratio of non-Latin letters in `text`.
+   * Covers Greek, Cyrillic, Arabic, Devanagari, CJK, Hebrew, Thai, etc.
+   */
+  private computeNonLatinCharacterRatio(text: string): number {
+    const letters = text.match(/\p{L}/gu) || [];
+    if (letters.length === 0) return 0;
+    const nonLatinLetters = letters.filter((char) => !/\p{Script=Latin}/u.test(char));
+    return nonLatinLetters.length / letters.length;
+  }
+
+  /** @deprecated Use computeNonLatinCharacterRatio for broader coverage. Kept for legacy callers. */
   private computeGreekCharacterRatio(text: string): number {
     const letters = text.match(/\p{L}/gu) || [];
     if (letters.length === 0) return 0;
@@ -1428,9 +1900,15 @@ Use clear step-by-step equations where relevant (one transformation per line) an
     return greekLetters.length / letters.length;
   }
 
-  private containsGreekScript(text: string): boolean {
-    return /\p{Script=Greek}/u.test(text || '');
+  /**
+   * Returns true if `text` contains ANY non-Latin script character
+   * (Greek, Cyrillic, Arabic, Devanagari, CJK, Hebrew, Thai, etc.).
+   * Used to detect a non-English script leaking into a tutor reply.
+   */
+  private containsNonLatinScript(text: string): boolean {
+    return /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}\s\d\p{P}\p{S}]/u.test(text || '');
   }
+
 
   private collectTutorResponseText(response: StructuredTutorResponse): string {
     return [
@@ -1438,6 +1916,9 @@ Use clear step-by-step equations where relevant (one transformation per line) an
       response.structuredContent?.plan,
       ...(response.structuredContent?.hints || []),
       ...(response.structuredContent?.steps || []),
+      ...(response.structuredContent?.examples || []),
+      response.structuredContent?.exercise,
+      response.structuredContent?.exerciseAnswers,
       response.structuredContent?.finalAnswer,
       response.structuredContent?.quickCheck,
       ...(response.structuredContent?.commonMistakes || []),
@@ -1449,11 +1930,44 @@ Use clear step-by-step equations where relevant (one transformation per line) an
   }
 
   private toStringArray(value: unknown): string[] | undefined {
-    if (!Array.isArray(value)) {
+    if (Array.isArray(value)) {
+      const normalized = value.filter((entry) => typeof entry === 'string').map((entry) => entry.trim());
+      return normalized.filter(Boolean).length ? normalized.filter(Boolean) : undefined;
+    }
+    if (typeof value === 'string') {
+      const lines = value
+        .split(/\r?\n/)
+        .map((line) => line.trim().replace(/^[\-\*\u2022]\s*/, '').replace(/^\d+[\.\)]\s*/, '').trim())
+        .filter(Boolean);
+      if (lines.length > 1) return lines;
+      if (lines.length === 1) return [lines[0]];
       return undefined;
     }
-    const normalized = value.filter((entry) => typeof entry === 'string') as string[];
-    return normalized.length ? normalized : undefined;
+    return undefined;
+  }
+
+  private async synthesizeSpeechAudio(
+    input: string,
+    voice: ReturnType<typeof resolveOpenAiTtsVoice>,
+    speed: number,
+  ): Promise<Buffer> {
+    let lastError: unknown;
+    for (const model of OPENAI_TTS_MODELS) {
+      try {
+        const audioResponse = await this.openai.audio.speech.create({
+          model,
+          voice,
+          speed,
+          response_format: 'mp3',
+          input,
+        });
+        return Buffer.from(await audioResponse.arrayBuffer());
+      } catch (error) {
+        lastError = error;
+        this.logger.warn(`TTS synthesis failed with model ${model}: ${error}`);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error('Tutor speech synthesis failed');
   }
 
   async generateTutorSpeech(params: {
@@ -1462,7 +1976,7 @@ Use clear step-by-step equations where relevant (one transformation per line) an
     text: string;
     locale?: string;
     learningMode?: 'hints' | 'full_solution';
-    voice?: 'alloy' | 'verse' | 'aria';
+    voice?: OpenAiTtsVoice | 'verse' | 'aria';
     speed?: number;
     structuredContent?: StructuredTutorContent;
   }) {
@@ -1473,7 +1987,7 @@ Use clear step-by-step equations where relevant (one transformation per line) an
     const locale = TUTOR_RESPONSE_LOCALE_FOR_QUALITY;
     const isGreek = false;
     const speed = Math.max(0.8, Math.min(1.2, params.speed ?? 1.0));
-    const voice = params.voice || 'alloy';
+    const voice = resolveOpenAiTtsVoice(params.voice);
     const sections = this.buildSpeechSections(
       params.text,
       params.structuredContent,
@@ -1489,15 +2003,8 @@ Use clear step-by-step equations where relevant (one transformation per line) an
 
       for (let subIndex = 0; subIndex < subChunks.length; subIndex += 1) {
         const normalized = this.prepareSpeechText(subChunks[subIndex], isGreek);
-        const audioResponse = await (this.openai.audio.speech as any).create({
-          model: 'gpt-4o-mini-tts',
-          voice,
-          speed,
-          response_format: 'mp3',
-          input: normalized,
-        });
-
-        const audioBuffer = Buffer.from(await audioResponse.arrayBuffer());
+        if (!normalized) continue;
+        const audioBuffer = await this.synthesizeSpeechAudio(normalized, voice, speed);
         chunks.push({
           id: `chunk_${sectionIndex}_${subIndex}`,
           title:
@@ -1510,6 +2017,10 @@ Use clear step-by-step equations where relevant (one transformation per line) an
           estimatedDurationMs: this.estimateSpeechDurationMs(normalized, speed),
         });
       }
+    }
+
+    if (!chunks.length) {
+      throw new Error('No speakable tutor content available for speech synthesis');
     }
 
     return {
@@ -1654,11 +2165,13 @@ Use clear step-by-step equations where relevant (one transformation per line) an
     out = out.replace(/\bN\b/g, isGreek ? 'Νιούτον' : 'newtons');
     out = out.replace(/\bJ\b/g, isGreek ? 'Τζάουλ' : 'joules');
 
+    // Only replace operator symbols when they appear in arithmetic context
+    // (surrounded by digits/spaces), not inside hyphenated words or contractions.
     out = out
-      .replace(/[=]/g, isGreek ? ' ισούται με ' : ' equals ')
+      .replace(/(?<=\s|^)=(?=\s|$)/g, isGreek ? ' ισούται με ' : ' equals ')
       .replace(/[×]/g, isGreek ? ' επί ' : ' times ')
-      .replace(/[-]/g, isGreek ? ' μείον ' : ' minus ')
-      .replace(/[+]/g, isGreek ? ' συν ' : ' plus ');
+      .replace(/(?<=[\d\s])-(?=[\d\s])/g, isGreek ? ' μείον ' : ' minus ')
+      .replace(/(?<=[\d\s])\+(?=[\d\s])/g, isGreek ? ' συν ' : ' plus ');
 
     out = out.replace(/\s+/g, ' ').trim();
     return out;
@@ -1700,6 +2213,10 @@ Use clear step-by-step equations where relevant (one transformation per line) an
       currentSubject?: string;
       locale?: string;
       preferFastResponses?: boolean;
+      grade?: string;
+      chapter?: string;
+      learningMode?: 'hints' | 'full_solution';
+      explainDepth?: 'short' | 'normal' | 'detailed';
     };
   }) {
     if (!this.openai) {
@@ -1707,35 +2224,118 @@ Use clear step-by-step equations where relevant (one transformation per line) an
     }
 
     try {
-      // Step 1: Transcribe (auto-detect language; tutor reply is always English)
-      const audioFile = fs.createReadStream(params.audioFilePath);
+      // ─────────────────────────────────────────────────────────────────────
+      // STEP 1: Speech-to-text transcription
+      //
+      // Model: gpt-4o-transcribe (OpenAI's latest, 2025).
+      //   • Far better than whisper-1 at handling accented English.
+      //   • language:'en'  forces English output regardless of the speaker's
+      //     accent — the model will NEVER switch to another language/script.
+      //   • prompt primes the vocabulary weighting away from non-Latin scripts.
+      //
+      // Fallback: if gpt-4o-transcribe is unavailable we retry with whisper-1
+      //   using the same language pin and prompt.
+      //
+      // Post-transcription guard: even after all of the above, if the returned
+      //   text contains ANY non-Latin characters (Chinese, Arabic, Greek, etc.)
+      //   we reject it immediately — it is never shown to the user and never
+      //   forwarded to GPT.
+      // ─────────────────────────────────────────────────────────────────────
 
-      const transcription = await this.openai.audio.transcriptions.create({
-        file: audioFile,
-        model: 'whisper-1',
-      });
+      const transcribeWithModel = async (model: string): Promise<string> => {
+        const audioFile = fs.createReadStream(params.audioFilePath);
+        const result = await this.openai.audio.transcriptions.create({
+          file: audioFile,
+          model,
+          // Forces English output — the model must not switch to any other
+          // language or script based on the speaker's accent.
+          language: 'en',
+          // Primes the model's output vocabulary toward English words.
+          // This is an additional signal on top of language:'en'.
+          prompt: 'The student is speaking English to a tutor. Transcribe only in English, exactly as spoken.',
+          // Plain text — no timestamps or extra metadata, just the transcript.
+          response_format: 'text',
+        });
+        // The SDK returns the text directly when response_format is 'text'.
+        return typeof result === 'string' ? result : (result as any).text ?? '';
+      };
 
-      const transcribedText = transcription.text;
+      let transcribedText = '';
+      try {
+        transcribedText = await transcribeWithModel(OPENAI_WHISPER_MODEL);
+      } catch (primaryError) {
+        this.logger.warn(
+          `gpt-4o-transcribe failed, falling back to ${OPENAI_WHISPER_FALLBACK_MODEL}: ${primaryError}`,
+        );
+        transcribedText = await transcribeWithModel(OPENAI_WHISPER_FALLBACK_MODEL);
+      }
 
       if (!transcribedText || transcribedText.trim().length === 0) {
         return {
           transcription: '',
-          message: "I couldn't hear that clearly. Could you please try again?",
+          message: "I couldn't hear that clearly. Please try speaking again.",
           sessionId: params.sessionId,
         };
       }
 
-      // Step 2: AI tutor response (English)
+      // ── Non-Latin script guard ────────────────────────────────────────────
+      // If the transcription contains ANY non-Latin characters despite the
+      // language pin (e.g. Chinese, Arabic, Greek, Cyrillic), reject it.
+      // The foreign text is never shown in the student bubble and never saved
+      // to the database — so it cannot anchor future GPT replies in that language.
+      if (this.containsNonLatinScript(transcribedText.trim())) {
+        this.logger.warn(
+          `Transcription rejected: non-Latin script detected (model=${OPENAI_WHISPER_MODEL})`,
+        );
+        return {
+          transcription: '',
+          message:
+            'It looks like the audio was transcribed in a different language. Please speak clearly in English and try again.',
+          sessionId: params.sessionId,
+        };
+      }
+
+      // Step 2: AI tutor response
+      //
+      // The transcription is already English (Whisper pins language:'en'), so
+      // skip the translateToEnglish() round-trip that chat() normally runs on
+      // every message.  That call:
+      //   (a) adds ~2–3 s of latency on every voice turn, and
+      //   (b) uses max_tokens:512 which silently truncates long transcriptions
+      //       (e.g. "I am studying X, Y, Z … please give me six problems")
+      //       before they reach the tutor model — producing a garbled or
+      //       incomplete request and causing the AI to respond with only an
+      //       intro sentence and empty structuredContent.
+      //
+      // We inject the transcription directly as the message, bypassing the
+      // translation step by patching the context flag used inside chat().
+      this.logger.log(
+        `[voice] transcription="${transcribedText.slice(0, 120)}" len=${transcribedText.length}`,
+      );
+
       const chatResponse = await this.chat({
         userId: params.userId,
         sessionId: params.sessionId,
         message: transcribedText,
-        context: params.context,
+        context: {
+          ...params.context,
+          // Signal that the message is already in English — the chat() method
+          // will skip translateToEnglish() when this flag is set.
+          _skipTranslation: true,
+        } as any,
       });
+
+      this.logger.log(
+        `[voice] structuredFields=${Object.keys(chatResponse.structuredContent || {}).filter((k) => {
+          const v = (chatResponse.structuredContent as any)[k];
+          return Array.isArray(v) ? v.length > 0 : Boolean(v);
+        }).join(',')}`,
+      );
 
       return {
         transcription: transcribedText,
         message: chatResponse.message,
+        structuredContent: chatResponse.structuredContent,
         sessionId: params.sessionId,
       };
     } catch (error) {
@@ -1867,7 +2467,7 @@ Use clear step-by-step equations where relevant (one transformation per line) an
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: params.model || 'gpt-4o-mini',
+        model: params.model || OPENAI_CHAT_MODEL,
         messages: [
           {
             role: 'system',

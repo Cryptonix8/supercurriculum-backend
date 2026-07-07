@@ -957,7 +957,7 @@ Return a valid JSON object with this exact structure (no markdown, no code block
 
     try {
       const response = await this.openai!.chat.completions.create({
-        model: 'gpt-4o',
+        model: 'gpt-5.5',
         messages: [
           { role: 'system', content: 'You are an expert educator. Output only valid JSON.' },
           { role: 'user', content: prompt },
@@ -1390,7 +1390,7 @@ Be encouraging and focus on growth. If they scored below 50%, emphasize that thi
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5.5',
         messages: [
           {
             role: 'system',
@@ -1878,7 +1878,7 @@ Return as JSON:
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5.5',
         messages: [
           {
             role: 'system',

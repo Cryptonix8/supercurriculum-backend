@@ -71,7 +71,7 @@ export class CustomAssignmentsService {
         duration: dto.duration,
         questionCount: dto.questionCount,
         content,
-        generationModel: 'gpt-4', // or get from config
+        generationModel: 'gpt-5.5', // or get from config
         createdById: userId,
         status: AssignmentStatus.DRAFT,
         visibility: AssignmentVisibility.PRIVATE,

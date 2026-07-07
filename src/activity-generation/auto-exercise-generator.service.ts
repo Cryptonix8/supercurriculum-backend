@@ -250,7 +250,7 @@ Generate appropriate content for ${subject.displayName} - ${skill.displayName}.`
       }
 
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5.5',
         messages: [
           {
             role: 'system',
@@ -765,7 +765,7 @@ Generate appropriate, UNIQUE content for ${subject.displayName} - ${skill.displa
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5.5',
         messages: [
           {
             role: 'system',
@@ -1058,7 +1058,7 @@ Return as JSON:
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5.5',
         messages: [
           {
             role: 'system',
@@ -1210,7 +1210,7 @@ Example for Maths - Fractions (INTERMEDIATE):
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5.5',
         messages: [
           {
             role: 'system',

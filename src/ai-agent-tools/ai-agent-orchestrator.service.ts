@@ -52,7 +52,7 @@ export class AiAgentOrchestratorService {
 
       // Call OpenAI with function calling
       let response = await this.openai.chat.completions.create({
-        model: 'gpt-4o',
+        model: 'gpt-5.5',
         messages,
         functions: AGENT_FUNCTIONS,
         function_call: 'auto',
@@ -92,7 +92,7 @@ export class AiAgentOrchestratorService {
 
         // Get next response from AI
         response = await this.openai.chat.completions.create({
-          model: 'gpt-4o',
+          model: 'gpt-5.5',
           messages,
           functions: AGENT_FUNCTIONS,
           function_call: 'auto',
