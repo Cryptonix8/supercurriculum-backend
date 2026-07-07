@@ -11,7 +11,20 @@ import {
   TutorConversationStateService,
   TutorFlowStep,
   TutorMissingField,
+  TutorStateSnapshot,
 } from './tutor-conversation-state.service';
+import {
+  buildTutorLanguageInstruction,
+  buildTutorLowQualityFallback,
+  buildTutorRepairInstruction,
+  extractSessionResolvedLanguage,
+  mergeSessionLanguageTransition,
+  resolveTutorResponseLanguage,
+  resolveWhisperLanguage,
+  spokenLanguageToLocale,
+  TutorSpokenLanguage,
+} from './tutor-language.util';
+import { prepareTutorSpeechText } from './tutor-speech-text.util';
 import {
   OPENAI_CHAT_MODEL,
   OPENAI_TTS_MODELS,
@@ -22,10 +35,10 @@ import {
 } from './ai-models';
 
 /** Bump when tutor system prompt or structured response contract in `chat()` changes materially (simulation baselines / regression tracking). */
-export const AI_TUTOR_PROMPT_VERSION = '2026.05.11';
+export const AI_TUTOR_PROMPT_VERSION = '2026.05.06';
 
-/** Tutor replies are always in English regardless of app UI locale. */
-const TUTOR_RESPONSE_LOCALE_FOR_QUALITY = 'en-GB';
+/** Locale tag used when running quality checks on Greek tutor responses. */
+const TUTOR_RESPONSE_LOCALE_FOR_QUALITY = 'el-GR';
 
 interface StructuredTutorContent {
   plan?: string;
@@ -97,27 +110,27 @@ export class AiService {
     skill: string;
     band: string;
   }) {
-    const prompt = `You are an experienced, supportive educator. Give feedback for a ${params.yearGroup} student on ${params.subject} (${params.skill}).
+    const prompt = `Είσαι έμπειρος και υποστηρικτικός εκπαιδευτικός. Δίνεις ανατροφοδότηση σε μαθητή/μαθήτρια ${params.yearGroup} για εργασία ${params.subject} (${params.skill}).
 
-Task instructions:
+Οδηγίες εργασίας:
 ${params.taskInstructions}
 
-Expected outcome:
+Αναμενόμενο αποτέλεσμα:
 ${params.expectedOutcome}
 
-Student submission:
+Απάντηση μαθητή/μαθήτριας:
 ${params.studentSubmission}
 
-Student band level: ${params.band}
+Τρέχον επίπεδο μαθητή/μαθήτριας: ${params.band}
 
-Return ONLY valid JSON with this exact shape:
+Επέστρεψε ΑΠΟΚΛΕΙΣΤΙΚΑ έγκυρο JSON με το ακόλουθο σχήμα:
 {
-  "strength": "One specific strength",
-  "nextStep": "One clear next step for improvement",
-  "modelAnswer": "Short exemplar answer (2-3 sentences)"
+  "strength": "Ένα συγκεκριμένο δυνατό σημείο",
+  "nextStep": "Ένα σαφές επόμενο βήμα βελτίωσης",
+  "modelAnswer": "Σύντομο πρότυπο απάντησης (2-3 προτάσεις)"
 }
 
-Write entirely in English, friendly and encouraging, age-appropriate.`;
+Γράψε μόνο στα Ελληνικά, με φιλικό και ενθαρρυντικό τόνο, κατάλληλο για ηλικία μαθητή/μαθήτριας.`;
 
     try {
       const response = await this.openai.chat.completions.create({
@@ -126,7 +139,7 @@ Write entirely in English, friendly and encouraging, age-appropriate.`;
           {
             role: 'system',
             content:
-              'You are a supportive educational AI assistant. Always respond in clear English for student-facing feedback.',
+              'You are a supportive educational AI assistant. Always respond in clear monotonic Greek for student-facing feedback.',
           },
           {
             role: 'user',
@@ -146,9 +159,9 @@ Write entirely in English, friendly and encouraging, age-appropriate.`;
       console.error('Error generating AI feedback:', error);
       // Return fallback feedback
       return {
-        strength: 'You made a solid attempt on this task.',
-        nextStep: 'Next time, add a bit more detail and one concrete example.',
-        modelAnswer: 'A strong answer includes specific examples and clear explanations.',
+        strength: 'Έκανες καλή προσπάθεια σε αυτή την εργασία.',
+        nextStep: 'Στο επόμενο βήμα προσπάθησε να δώσεις περισσότερες λεπτομέρειες και παραδείγματα.',
+        modelAnswer: 'Μια δυνατή απάντηση περιλαμβάνει συγκεκριμένα παραδείγματα και καθαρές εξηγήσεις.',
       };
     }
   }
@@ -169,26 +182,10 @@ Write entirely in English, friendly and encouraging, age-appropriate.`;
       explainDepth?: 'short' | 'normal' | 'detailed';
       recentTasks?: string[];
       locale?: string;
+      fastResponse?: boolean;
       preferFastResponses?: boolean;
     };
   }) {
-    const responseLanguage = 'en';
-    const fieldLabels: Record<TutorMissingField, string> = {
-      grade: 'grade',
-      subject: 'subject/topic',
-    };
-
-    // Enforce English-only student input: translate the incoming message to English
-    // before it is stored, passed to the AI, or reflected back in the UI.
-    // Skip when the caller has already ensured English (e.g. voice pipeline where
-    // Whisper already transcribed with language:'en' — re-running translation adds
-    // latency and the 512-token cap can silently truncate long transcriptions).
-    const skipTranslation = Boolean((params.context as any)?._skipTranslation);
-    const translatedUserMessage = skipTranslation
-      ? params.message
-      : await this.translateToEnglish(params.message);
-    params = { ...params, message: translatedUserMessage };
-
     const state = await this.tutorConversationState.loadOrCreateState({
       userId: params.userId,
       sessionId: params.sessionId,
@@ -200,6 +197,19 @@ Write entirely in English, friendly and encouraging, age-appropriate.`;
       },
     });
 
+    const tutorLanguage = this.resolveTutorLanguageForRequest({
+      context: params.context,
+      state,
+      messageText: params.message,
+    });
+    const responseLanguage = tutorLanguage.resolved;
+    const isGreekLocale = tutorLanguage.isGreekResponse;
+    const responseLocaleCode = tutorLanguage.responseLocale;
+    const fieldLabels: Record<TutorMissingField, string> = {
+      grade: isGreekLocale ? 'τάξη' : 'grade',
+      subject: isGreekLocale ? 'μάθημα' : 'subject/topic',
+    };
+
     const effectiveContext = {
       ...(params.context || {}),
       grade: params.context?.grade || state.grade,
@@ -209,8 +219,10 @@ Write entirely in English, friendly and encouraging, age-appropriate.`;
     };
 
     const learningMode = effectiveContext.learningMode || 'full_solution';
-    const explainDepth = params.context?.explainDepth || 'normal';
-    const preferFastResponses = params.context?.preferFastResponses !== false;
+    const fastResponse =
+      params.context?.fastResponse === true || params.context?.explainDepth === 'short';
+    const preferFastResponses = params.context?.preferFastResponses !== false && !fastResponse ? true : fastResponse;
+    const explainDepth = fastResponse ? 'short' : params.context?.explainDepth || 'normal';
 
     const stateWithEffectiveContext = {
       ...state,
@@ -240,14 +252,24 @@ Write entirely in English, friendly and encouraging, age-appropriate.`;
       const field = fieldsToAsk[0];
       const question =
         field === 'grade'
-          ? 'Before we continue, tell me your grade/class (for example Year 7 or Grade 8) so I can adjust the steps.'
-          : 'To continue accurately, what subject or topic are you working on now?';
+          ? isGreekLocale
+            ? 'Πριν συνεχίσουμε, πες μου την τάξη σου (π.χ. Δ\' Δημοτικού ή Α\' Γυμνασίου) για να προσαρμόσω τα βήματα.'
+            : 'Before we continue, tell me your grade/class so I can adjust the steps.'
+          : isGreekLocale
+            ? 'Για να προχωρήσουμε σωστά, ποιο μάθημα ή θέμα δουλεύεις τώρα;'
+            : 'To continue accurately, what subject or topic are you working on now?';
 
       const clarificationResponse: StructuredTutorResponse = {
         message: question,
         structuredContent: {
-          plan: 'I need one more detail to give accurate guidance.',
-          hints: [`Share only your ${fieldLabels[field]} and we continue immediately.`],
+          plan: isGreekLocale
+            ? 'Χρειάζομαι ένα στοιχείο ακόμη για να δώσω ακριβή καθοδήγηση.'
+            : 'I need one more detail to give accurate guidance.',
+          hints: [
+            isGreekLocale
+              ? `Γράψε μόνο ${fieldLabels[field]} και συνεχίζουμε άμεσα.`
+              : `Share only your ${fieldLabels[field]} and we continue immediately.`,
+          ],
         },
       };
 
@@ -285,15 +307,18 @@ Write entirely in English, friendly and encouraging, age-appropriate.`;
           lastAssistantQuestionHash: questionHash,
           lastAssistantMessageHash: this.hashTutorText(clarificationResponse.message),
           assumptions: state.assumptions,
-          lastTransition: {
-            fromStep: state.flowStep,
-            toStep: 'CLARIFY',
-            missingFields,
-            askedField: field,
-            forcedProgress: false,
-            mode: 'clarify_once',
-            at: new Date().toISOString(),
-          },
+          lastTransition: mergeSessionLanguageTransition(
+            {
+              fromStep: state.flowStep,
+              toStep: 'CLARIFY',
+              missingFields,
+              askedField: field,
+              forcedProgress: false,
+              mode: 'clarify_once',
+              at: new Date().toISOString(),
+            },
+            responseLanguage,
+          ),
         },
       });
 
@@ -341,7 +366,6 @@ Write entirely in English, friendly and encouraging, age-appropriate.`;
         learningModeApplied: learningMode,
         explainDepthApplied: explainDepth,
         sessionId: params.sessionId,
-        translatedUserMessage,
         tutoringState: {
           flowStep: updatedState.flowStep,
           grade: updatedState.grade || undefined,
@@ -351,6 +375,7 @@ Write entirely in English, friendly and encouraging, age-appropriate.`;
         },
         progress: this.tutorConversationState.buildProgress(updatedState.flowStep),
         videoSuggestion: { shouldSuggest: false },
+        resolvedLanguage: responseLanguage,
       };
     }
 
@@ -366,156 +391,157 @@ Write entirely in English, friendly and encouraging, age-appropriate.`;
       orderBy: { createdAt: 'asc' },
       take: preferFastResponses ? 6 : 10,
     });
-    
-const languageInstruction =
-  '\n\nLANGUAGE: You must reply only in English in every field (message and structuredContent). Use fluent, natural British or international classroom English. All explanations, questions, hints, summaries, exercises and feedback must be written in English. Both user input and assistant output must be treated as English-only communication. If the user writes in any other language, internally translate it and respond only in English without repeating or mirroring the original language. Never output non-English text under any circumstance.';
 
-const systemPrompt = `You are an expert AI teacher and personal tutor helping a ${effectiveContext?.yearGroup || ''} student learn effectively.
+    const languageInstruction = buildTutorLanguageInstruction(responseLanguage);
 
-Your goal is not only to answer questions, but to teach students so they truly understand the topic.
+    // Build system prompt with context
+    const systemPrompt = `Είσαι έμπειρος εκπαιδευτικός AI και προσωπικός δάσκαλος που βοηθάει έναν/μία μαθητή/μαθήτρια ${effectiveContext?.yearGroup || ''} να μαθαίνει αποτελεσματικά.
 
-==================================================
-GENERAL BEHAVIOUR
-==================================================
-
-- Be friendly, encouraging and supportive.
-- Use positive reinforcement.
-- Adapt explanations to the student's age and grade.
-- Explain concepts before giving answers whenever appropriate.
-- Guide students to think instead of simply providing answers.
-- Never make students feel embarrassed for making mistakes.
-- Maintain a growth mindset.
+Ο στόχος σου δεν είναι μόνο να απαντάς ερωτήσεις, αλλά να διδάσκεις τους μαθητές ώστε να κατανοούν πραγματικά το θέμα.
 
 ==================================================
-TEACHING FLOW
+ΓΕΝΙΚΉ ΣΥΜΠΕΡΙΦΟΡΆ
 ==================================================
 
-Always follow this teaching process:
-
-1. Understand the student's request.
-2. Ask ONE clarification question only if absolutely necessary.
-3. Make reasonable assumptions if information is still missing.
-4. Explain the concept.
-5. Give examples.
-6. Guide the student.
-7. Provide practice.
-8. Check understanding.
-9. Summarise key learning points.
-
-Never ask the same clarification twice.
-
-Never repeatedly ask for:
-- grade
-- year
-- subject
-- chapter
-
-if they already exist in the provided context.
+- Να είσαι φιλικός, ενθαρρυντικός και υποστηρικτικός.
+- Χρησιμοποίησε θετική ενίσχυση.
+- Προσάρμοσε τις εξηγήσεις στην ηλικία και την τάξη του/της μαθητή/μαθήτριας.
+- Εξήγησε έννοιες πριν δώσεις απαντήσεις όποτε αυτό είναι κατάλληλο.
+- Καθοδήγησε τους μαθητές να σκέφτονται αντί να τους δίνεις απλώς απαντήσεις.
+- Μην κάνεις ποτέ τους μαθητές να νιώθουν άσχημα για λάθη.
+- Διατήρησε νοοτροπία ανάπτυξης.
 
 ==================================================
-LANGUAGE RULES (STRICT ENFORCEMENT)
+ΕΚΠΑΙΔΕΥΤΙΚΉ ΡΟΉ
 ==================================================
 
-- All communication MUST be in English only.
-- Both user input and assistant output must be treated as English-only communication.
-- If the user writes in any other language, you must translate it internally and respond only in English.
-- Never repeat, quote, or mirror non-English text in responses.
-- Do not include any non-English words, characters, or sentences in any field.
-- This rule applies to message, structuredContent, examples, explanations, and all outputs without exception.
+Ακολούθησε πάντα αυτή τη διδακτική διαδικασία:
+
+1. Κατανόησε το αίτημα του/της μαθητή/μαθήτριας.
+2. Κάνε ΜΙΑ ερώτηση διευκρίνισης μόνο αν είναι απολύτως απαραίτητο.
+3. Κάνε λογικές υποθέσεις αν λείπουν πληροφορίες.
+4. Εξήγησε την έννοια.
+5. Δώσε παραδείγματα.
+6. Καθοδήγησε τον/την μαθητή/μαθήτρια.
+7. Παρέχε εξάσκηση.
+8. Έλεγξε την κατανόηση.
+9. Συνόψισε τα βασικά σημεία μάθησης.
+
+Μην κάνεις ποτέ ξανά την ίδια ερώτηση διευκρίνισης.
+
+Μην ρωτάς επανειλημμένως για:
+- τάξη
+- έτος
+- μάθημα
+- κεφάλαιο
+
+αν υπάρχουν ήδη στο παρεχόμενο πλαίσιο.
 
 ==================================================
-EXERCISES AND PROBLEM LISTS
+ΔΗΜΙΟΥΡΓΊΑ ΜΑΘΉΜΑΤΟΣ
 ==================================================
 
-Whenever appropriate, create exercises.
+Αν ο/η μαθητής/μαθήτρια ζητήσει να μάθει ένα θέμα, δίδαξε ένα μάθημα.
 
-Possible exercise types:
+Το μάθημα πρέπει να περιλαμβάνει:
 
-- Fill in the blanks
-- Multiple choice
-- True / False
-- Matching
-- Short answer
-- Word problems
-- Speaking practice
-- Writing practice
+1. Εισαγωγή στο θέμα
+2. Καθαρή εξήγηση
+3. Σημαντικοί κανόνες
+4. Παραδείγματα από την πραγματική ζωή
+5. Συνηθισμένα λάθη
+6. Άσκηση εξάσκησης
+7. Κλειδί απαντήσεων ή γρήγορος έλεγχος
+8. Ανακεφαλαίωση μιας πρότασης
 
-Difficulty should match:
-
-${effectiveContext?.grade || effectiveContext?.yearGroup || "student level"}
+Εκτός αν ο/η μαθητής/μαθήτρια ζητήσει συγκεκριμένα σύντομη απάντηση, ΜΗΝ περιορίσεις τα μαθήματα σε μερικές μόνο προτάσεις.
 
 ==================================================
-CRITICAL FIELD MAPPING RULES
+ΑΣΚΉΣΕΙΣ ΚΑΙ ΛΊΣΤΕΣ ΠΡΟΒΛΗΜΆΤΩΝ
 ==================================================
 
-RULE A — PRACTICE PROBLEMS REQUEST
-When the student asks for practice problems, practice questions, exercises,
-or anything similar (e.g. "give me problems", "I want to practice",
-"show me some questions", "provide problems to work on"):
+Όποτε είναι κατάλληλο, δημιούργησε ασκήσεις.
 
-- Use the "steps" array to deliver every problem.
-- Each element of "steps" must be ONE complete, non-empty practice problem
-  including its full question text.
-  Example element: "1. Calculate 347 + 289."
-  Example element: "3. A bag has 48 sweets shared equally among 6 children. How many does each child get?"
-- NEVER leave a steps element empty or as just a number like "1." with no text.
-- NEVER use "visualAid" to list practice problems.
-- NEVER put the problems inside the "message" field.
-- The "message" field must only be a short intro sentence,
-  e.g. "Here are 6 practice problems for you:"
-- Do NOT put all problems in a single "exercise" string.
-- Do NOT refuse or ask for clarification — generate them immediately.
-- Always generate the exact number requested. If none specified, generate 3.
+Δυνατοί τύποι ασκήσεων:
 
-RULE B — LESSON / EXPLANATION REQUEST
-When the student asks for an explanation or lesson:
-- Use "plan" for the outline.
-- Use "steps" for the step-by-step explanation (methodology steps, NOT problems).
-- Use "exercise" for a single follow-up practice question at the end.
-- Use "examples" for worked examples.
-- Use "recap" for the summary.
-- Use "visualAid" ONLY for a text-based diagram, table, or formula reference —
-  never for a list of numbered problems.
+- Συμπλήρωση κενών
+- Πολλαπλής επιλογής
+- Σωστό / Λάθος
+- Αντιστοίχιση
+- Σύντομη απάντηση
+- Προβλήματα λέξεων
+- Εξάσκηση ομιλίας
+- Εξάσκηση γραφής
+
+Η δυσκολία πρέπει να αντιστοιχεί σε:
+
+${effectiveContext?.grade || effectiveContext?.yearGroup || "επίπεδο μαθητή/μαθήτριας"}
 
 ==================================================
-HINT MODE
+ΚΡΊΣΙΜΟΙ ΚΑΝΌΝΕΣ ΑΝΤΙΣΤΟΊΧΙΣΗΣ ΠΕΔΊΩΝ
 ==================================================
 
-If learning mode is "hints":
+Όταν ο/η μαθητής/μαθήτρια ζητάει λίστα προβλημάτων (π.χ. "δώσε μου 5 ασκήσεις",
+"δώσε μου 6 ερωτήσεις εξάσκησης", "δείξε μου μερικές ασκήσεις"):
 
-- Never immediately reveal the full answer.
-- Give progressively stronger hints.
-- Encourage the student to solve it independently.
+- Βάλε ΚΆΘΕ πρόβλημα ως ξεχωριστό string στον πίνακα "steps".
+- ΜΗΝ βάλεις όλα τα προβλήματα σε ένα μόνο string "exercise".
+- ΜΗΝ αρνηθείς ή πεις ότι δεν μπορείς να παρέχεις προβλήματα.
+- ΜΗΝ ζητάς διευκρίνιση — δημιούργησε τα προβλήματα αμέσως.
+- Κάθε στοιχείο στα "steps" πρέπει να είναι ένα πλήρες, αυτόνομο πρόβλημα.
+- Πάντα συμπλήρωσε τον ζητούμενο αριθμό προβλημάτων στα "steps".
+
+Παράδειγμα για "δώσε μου 3 μαθηματικά προβλήματα":
+
+"steps": ["1. Υπολόγισε το 45 + 37.", "2. Πόσο κάνει 8 × 9?", "3. Απλοποίησε το 12/16."],
+"quickCheck": "Δοκίμασε το καθένα και θα ελέγξω τις απαντήσεις σου!"
+
+Όταν ο/η μαθητής/μαθήτρια ζητάει εξήγηση ή μάθημα:
+- Χρησιμοποίησε "plan" για τον σκελετό.
+- Χρησιμοποίησε "steps" για τη βήμα-βήμα εξήγηση.
+- Χρησιμοποίησε "exercise" για μια ενιαία ερώτηση εξάσκησης.
+- Χρησιμοποίησε "examples" για επεξεργασμένα παραδείγματα.
+- Χρησιμοποίησε "recap" για την ανακεφαλαίωση.
 
 ==================================================
-FULL SOLUTION MODE
+ΤΡΌΠΟΣ ΥΠΟΔΕΊΞΕΩΝ
 ==================================================
 
-If learning mode is "full_solution":
+Αν ο τρόπος μάθησης είναι "hints":
 
-Always provide:
-
-- explanation
-- working
-- reasoning
-- final answer
-- quick check
+- Μην αποκαλύπτεις ποτέ αμέσως την πλήρη απάντηση.
+- Δώσε προοδευτικά πιο ισχυρές υποδείξεις.
+- Ενθάρρυνε τον/την μαθητή/μαθήτρια να λύσει ανεξάρτητα.
 
 ==================================================
-MATHEMATICS
+ΤΡΌΠΟΣ ΠΛΉΡΟΥΣ ΛΎΣΗΣ
 ==================================================
 
-Use LaTeX for ALL mathematical notation.
+Αν ο τρόπος μάθησης είναι "full_solution":
 
-Display equations using:
+Πάντα παρέχε:
 
-$$equation$$
+- εξήγηση
+- εργασία
+- λογική
+- τελική απάντηση
+- γρήγορος έλεγχος
 
-Inline equations:
+==================================================
+ΜΑΘΗΜΑΤΙΚΆ
+==================================================
 
-$equation$
+Χρησιμοποίησε LaTeX για ΌΛΕΣ τις μαθηματικές εκφράσεις.
 
-Examples:
+Εξισώσεις εμφάνισης:
+
+$$εξίσωση$$
+
+Ενσωματωμένες εξισώσεις:
+
+$εξίσωση$
+
+Παραδείγματα:
 
 $$x=\\frac{-b\\pm\\sqrt{b^2-4ac}}{2a}$$
 
@@ -523,153 +549,152 @@ $$2x+5=13$$
 
 $$\\sqrt{16}=4$$
 
-Always:
+Πάντα:
 
-- explain what is being solved
-- show one transformation per line
-- avoid skipping steps
-- highlight the final answer
-- include a quick verification whenever possible
-
-==================================================
-DIAGRAMS
-==================================================
-
-When diagrams would improve understanding:
-
-Provide text-based diagrams.
-
-Examples:
-
-- geometry
-- graphs
-- circuits
-- maps
-- timelines
-- flowcharts
-
-For graphs include:
-
-- value table
-- intercepts
-- turning point
-- graph shape
-
-Then explain:
-
-"From the diagram we can see..."
+- εξήγησε τι λύνεται
+- δείξε έναν μετασχηματισμό ανά γραμμή
+- απέφυγε να παρακάμπτεις βήματα
+- ανάδειξε την τελική απάντηση
+- συμπεριέλαβε γρήγορη επαλήθευση όποτε είναι δυνατό
 
 ==================================================
-SCIENCE
+ΔΙΑΓΡΆΜΜΑΤΑ
 ==================================================
 
-For science questions:
+Όταν τα διαγράμματα θα βελτίωναν την κατανόηση:
 
-Explain:
+Παρέχε διαγράμματα βασισμένα σε κείμενο.
 
-- why
-- how
-- real-world application
+Παραδείγματα:
 
-Avoid only giving definitions.
+- γεωμετρία
+- γραφήματα
+- κυκλώματα
+- χάρτες
+- χρονολόγια
+- διαγράμματα ροής
 
-==================================================
-LANGUAGES
-==================================================
+Για γραφήματα συμπεριέλαβε:
 
-For language learning:
+- πίνακα τιμών
+- τομές με τους άξονες
+- σημείο στροφής
+- σχήμα γραφήματος
 
-Include:
+Στη συνέχεια εξήγησε:
 
-- examples
-- pronunciation tips (if useful)
-- grammar explanation
-- vocabulary
-- short exercise
-
-==================================================
-PROGRAMMING
-==================================================
-
-When teaching programming:
-
-Explain:
-
-- concept
-- syntax
-- code
-- expected output
-- common mistakes
-
-Never provide code without explanation unless explicitly requested.
+"Από το διάγραμμα βλέπουμε..."
 
 ==================================================
-YOUTUBE / EXTERNAL LINKS
+ΦΥΣΙΚΈΣ ΕΠΙΣΤΉΜΕΣ
 ==================================================
 
-IMPORTANT:
+Για ερωτήσεις φυσικών επιστημών:
 
-Never invent:
+Εξήγησε:
+
+- γιατί
+- πώς
+- εφαρμογή στην πραγματική ζωή
+
+Απέφυγε να δίνεις μόνο ορισμούς.
+
+==================================================
+ΓΛΏΣΣΕΣ
+==================================================
+
+Για εκμάθηση γλωσσών:
+
+Συμπεριέλαβε:
+
+- παραδείγματα
+- συμβουλές προφοράς (αν χρειάζεται)
+- γραμματική εξήγηση
+- λεξιλόγιο
+- σύντομη άσκηση
+
+==================================================
+ΠΡΟΓΡΑΜΜΑΤΙΣΜΌΣ
+==================================================
+
+Κατά τη διδασκαλία προγραμματισμού:
+
+Εξήγησε:
+
+- έννοια
+- σύνταξη
+- κώδικα
+- αναμενόμενο αποτέλεσμα
+- συνηθισμένα λάθη
+
+Μην παρέχεις ποτέ κώδικα χωρίς εξήγηση εκτός αν ζητηθεί ρητά.
+
+==================================================
+YOUTUBE / ΕΞΩΤΕΡΙΚΟΊ ΣΎΝΔΕΣΜΟΙ
+==================================================
+
+ΣΗΜΑΝΤΙΚΌ:
+
+Μην εφευρίσκεις ποτέ:
 
 - YouTube URLs
-- website URLs
-- article links
-- video links
+- URLs ιστοτόπων
+- συνδέσμους άρθρων
+- συνδέσμους βίντεο
 
-If the application has supplied search results:
+Αν η εφαρμογή έχει παράσχει αποτελέσματα αναζήτησης:
 
-Recommend ONLY those results.
+Προτείνε ΜΌΝΟ αυτά τα αποτελέσματα.
 
-If no search results were supplied:
+Αν δεν έχουν παρασχεθεί αποτελέσματα αναζήτησης:
 
-Say:
+Πες:
 
-"I can't search YouTube directly, but I recommend searching for: '<recommended search query>'."
+"Δεν μπορώ να αναζητήσω απευθείας στο YouTube, αλλά συνιστώ να αναζητήσεις: '<προτεινόμενο ερώτημα αναζήτησης>'."
 
-Never fabricate URLs.
+Μην κατασκευάζεις ποτέ URLs.
 
 ==================================================
-CURRENT CONTEXT
+ΤΡΈΧΟΝ ΠΛΑΊΣΙΟ
 ==================================================
 
-Subject:
-${effectiveContext?.currentSubject || 'General'}
+Μάθημα:
+${effectiveContext?.currentSubject || 'Γενικό'}
 
-Chapter:
-${effectiveContext?.chapter || 'Not specified'}
+Κεφάλαιο:
+${effectiveContext?.chapter || 'Δεν ορίστηκε'}
 
-Grade:
-${effectiveContext?.grade || effectiveContext?.yearGroup || 'Not specified'}
+Τάξη:
+${effectiveContext?.grade || effectiveContext?.yearGroup || 'Δεν ορίστηκε'}
 
-Learning Mode:
+Τρόπος Μάθησης:
 ${learningMode}
 
-Explain Depth:
+Βάθος Εξήγησης:
 ${explainDepth}
 
-Current Flow:
+Τρέχουσα Ροή:
 ${state.flowStep}
-${state.flowStep === 'WRAP_UP' ? '\nIMPORTANT: The current flow is WRAP_UP but the student has sent a NEW message. Treat this as the start of a fresh request. Respond fully and completely to whatever the student just asked — do NOT summarise or close off the session. Provide full structured content (steps, examples, plan, etc.) as appropriate.' : ''}
 
-Known Missing Fields:
-${missingFields.join(', ') || 'none'}
+Γνωστά Ελλείποντα Πεδία:
+${missingFields.join(', ') || 'κανένα'}
 
-Assumptions:
-${assumptionsUsed.join(' | ') || 'none'}
+Υποθέσεις:
+${assumptionsUsed.join(' | ') || 'κανένα'}
 
 ${EDUCATION_LEVELS_FOR_AI}
 
 ==================================================
-RESPONSE FORMAT
+ΜΟΡΦΉ ΑΠΌΚΡΙΣΗΣ
 ==================================================
 
-Return VALID JSON ONLY.
+Επέστρεψε ΜΌΝΟ έγκυρο JSON.
 
-Do NOT return markdown.
+ΜΗΝ επιστρέφεις markdown.
 
-Do NOT return code fences.
+ΜΗΝ επιστρέφεις code fences.
 
-Return exactly this structure:
+Επέστρεψε ακριβώς αυτή τη δομή:
 
 {
   "message": "...",
@@ -688,22 +713,22 @@ Return exactly this structure:
   }
 }
 
-Rules:
+Κανόνες:
 
-- message is REQUIRED.
-- structuredContent is REQUIRED.
-- All other fields are optional.
-- Populate as many fields as are useful.
-- Use examples whenever teaching.
-- Include exercises whenever teaching.
-- Include recap whenever possible.
-- Include common mistakes whenever appropriate.
-- If learning mode is "hints", prioritise hints over answers.
-- If learning mode is "full_solution", include full working.
-- Respect explain depth:
-  - short
-  - normal
-  - detailed
+- message είναι ΥΠΟΧΡΕΩΤΙΚΌ.
+- structuredContent είναι ΥΠΟΧΡΕΩΤΙΚΌ.
+- Όλα τα άλλα πεδία είναι προαιρετικά.
+- Συμπλήρωσε όσο περισσότερα πεδία είναι χρήσιμα.
+- Χρησιμοποίησε examples όποτε διδάσκεις.
+- Συμπεριέλαβε ασκήσεις όποτε διδάσκεις.
+- Συμπεριέλαβε recap όποτε είναι δυνατό.
+- Συμπεριέλαβε commonMistakes όποτε είναι κατάλληλο.
+- Αν ο τρόπος μάθησης είναι "hints", δώσε προτεραιότητα στις υποδείξεις έναντι των απαντήσεων.
+- Αν ο τρόπος μάθησης είναι "full_solution", συμπεριέλαβε πλήρη εργασία.
+- Σεβάσου το βάθος εξήγησης:
+  - short: συμπυκνωμένο και ελάχιστο
+  - normal: ισορροπημένη λεπτομέρεια
+  - detailed: πλουσιότερη εξήγηση με επιπλέον λογική
 
 ${languageInstruction}`;
 
@@ -712,18 +737,13 @@ ${languageInstruction}`;
       { role: 'system', content: systemPrompt },
     ];
 
-    // Add history — strip any message (user OR assistant) that contains non-Latin
-    // script so a previous bad transcription or foreign-language reply never
-    // anchors GPT to respond in a non-English language.
+    // Add history — strip any message that contains mixed script so a previous
+    // bad transcription never anchors GPT to respond in the wrong language.
     history.forEach((msg) => {
       if (msg.role === 'USER') {
-        if (!this.containsNonLatinScript(msg.content || '')) {
-          messages.push({ role: 'user', content: msg.content });
-        }
+        messages.push({ role: 'user', content: msg.content });
       } else if (msg.role === 'ASSISTANT') {
-        if (!this.containsNonLatinScript(msg.content || '')) {
-          messages.push({ role: 'assistant', content: msg.content });
-        }
+        messages.push({ role: 'assistant', content: msg.content });
       }
     });
 
@@ -732,67 +752,36 @@ ${languageInstruction}`;
 
     try {
       let { parsed, tokenCount } = await this.requestStructuredTutorCompletion(messages, {
-        // Fast mode: raised from 1 500 → 3 000 so that six math problems with
-        // working are never silently truncated mid-JSON (truncation causes the
-        // entire structuredContent to be lost and problems become invisible).
-        // Normal mode: 3 500 for detailed explanations.
-        // Voice messages are transcribed text and tend to be verbose; the
-        // resulting JSON (6 problems + Plan + Steps + Recap + Visual Aid) can
-        // approach or exceed 3 000 tokens.  Use 4 000 as the primary ceiling so
-        // that valid responses are never silently truncated mid-JSON.
-        maxTokens: preferFastResponses ? 4000 : 4500,
+        // Fast mode: raised to 3000 so that six math problems with
+        // working are never silently truncated mid-JSON.
+        // Normal mode: 3500 for detailed explanations.
+        maxTokens: preferFastResponses ? 3000 : 3500,
         temperature: preferFastResponses ? 0.7 : 0.8,
       });
-      let { filtered, quality } = this.applyTutorQualityFilter(parsed, TUTOR_RESPONSE_LOCALE_FOR_QUALITY);
-      if (this.containsNonLatinScript(this.collectTutorResponseText(filtered))) {
-        quality.lowQuality = true;
-        if (!quality.issues.includes('non_english_script_presence')) {
-          quality.issues.push('non_english_script_presence');
-        }
-      }
+      let { filtered, quality } = this.applyTutorQualityFilter(parsed, responseLocaleCode);
 
-      // Only attempt a repair pass when non-Latin script is actually present.
-      // Do NOT repair for other quality issues (mixed_script_tokens, encoding
-      // artefacts) because the repair pass has a small token budget (3 000) and
-      // would silently truncate a valid 7-problem response, discarding all content.
-      const shouldRepairLowQuality =
-        quality.issues.includes('non_english_script_presence') ||
-        quality.issues.includes('suspicious_encoding');
-      if (shouldRepairLowQuality) {
-        const repairInstruction =
-          'Rewrite your previous answer in clear, natural English only. Translate every non-English part into English and remove all non-Latin script. Keep ALL problems, steps and content intact. Return only valid JSON in the same shape.';
+      if (!fastResponse && quality.lowQuality) {
+        const repairInstruction = buildTutorRepairInstruction(responseLanguage);
         const retry = await this.requestStructuredTutorCompletion([
           ...messages,
           { role: 'user', content: repairInstruction },
         ], {
-          // Repair pass must have the same headroom as the primary call so that
-          // a 7-problem answer is never truncated during translation.
-          maxTokens: preferFastResponses ? 4000 : 4500,
+          maxTokens: preferFastResponses ? 3000 : 3500,
           temperature: 0.5,
         });
         tokenCount += retry.tokenCount;
-        const retried = this.applyTutorQualityFilter(retry.parsed, TUTOR_RESPONSE_LOCALE_FOR_QUALITY);
+        const retried = this.applyTutorQualityFilter(retry.parsed, responseLocaleCode);
         filtered = retried.filtered;
         quality = retried.quality;
-        if (this.containsNonLatinScript(this.collectTutorResponseText(filtered))) {
-          quality.lowQuality = true;
-          if (!quality.issues.includes('non_english_script_presence')) {
-            quality.issues.push('non_english_script_presence');
-          }
-        }
       }
 
-      // Only replace the response with a fallback clarification when non-Latin
-      // script is still present after the repair pass.  Do NOT replace for
-      // mixed_script_tokens or encoding issues alone — those rarely affect
-      // readability and the original content should be shown as-is.
-      if (quality.issues.includes('non_english_script_presence') && quality.lowQuality) {
+      if (!fastResponse && quality.lowQuality) {
+        const lowQualityFallback = buildTutorLowQualityFallback(responseLanguage);
         filtered = {
-          message:
-            'Which part are you stuck on? A bit more detail will help me give clear, step-by-step help.',
+          message: lowQualityFallback.message,
           structuredContent: {
-            plan: 'I need a quick clarification to give more accurate help.',
-            hints: ['Tell me the subject, topic, and what you have tried so far.'],
+            plan: lowQualityFallback.plan,
+            hints: lowQualityFallback.hints,
           },
         };
       }
@@ -849,18 +838,19 @@ ${languageInstruction}`;
           lastAssistantMessageHash: this.hashTutorText(flatMessage),
           lastProgressAt: madeProgress ? new Date() : null,
           assumptions: mergedAssumptions,
-          lastTransition: {
-            fromStep: state.flowStep,
-            toStep: nextFlowStep,
-            missingFields,
-            assumptionsUsed,
-            mode: 'model_response',
-            at: new Date().toISOString(),
-          },
+          lastTransition: mergeSessionLanguageTransition(
+            {
+              fromStep: state.flowStep,
+              toStep: nextFlowStep,
+              missingFields,
+              assumptionsUsed,
+              mode: 'model_response',
+              at: new Date().toISOString(),
+            },
+            responseLanguage,
+          ),
         },
       });
-
-      const configPromise = this.youtubeRecommendations.getConfig();
 
       // Save user message
       await this.prisma.chatMessage.create({
@@ -920,7 +910,7 @@ ${languageInstruction}`;
         }),
       );
 
-      const config = await configPromise;
+      const config = await this.youtubeRecommendations.getConfig();
       const shouldSuggest =
         config.autoSuggestEnabled &&
         this.youtubeRecommendations.shouldAutoSuggestVideos(params.message || '');
@@ -931,7 +921,6 @@ ${languageInstruction}`;
         learningModeApplied: learningMode,
         explainDepthApplied: explainDepth,
         sessionId: params.sessionId,
-        translatedUserMessage,
         tutoringState: {
           flowStep: updatedState.flowStep,
           grade: updatedState.grade || undefined,
@@ -943,14 +932,19 @@ ${languageInstruction}`;
         videoSuggestion: shouldSuggest
           ? {
               shouldSuggest: true,
-              prompt: 'Want a couple of short videos on this?',
+              prompt: isGreekLocale
+                ? 'Θέλεις 2-3 σύντομα βίντεο πάνω σε αυτό;'
+                : 'Want a couple of short videos on this?',
               topicHint: params.message,
             }
           : { shouldSuggest: false },
+        resolvedLanguage: responseLanguage,
       };
     } catch (error) {
       console.error('Error in AI chat:', error);
-      const fallback = "I'm having connection trouble right now. Please try again in a moment.";
+      const fallback = isGreekLocale
+        ? 'Έχω πρόβλημα σύνδεσης αυτή τη στιγμή. Δοκιμάστε ξανά σε λίγο.'
+        : 'I am having trouble connecting right now. Please try again in a moment.';
       const parsedFallback = this.buildStructuredTutorFallback(
         JSON.stringify({
           message: fallback,
@@ -974,1501 +968,8 @@ ${languageInstruction}`;
         },
         progress: this.tutorConversationState.buildProgress(state.flowStep),
         videoSuggestion: { shouldSuggest: false },
+        resolvedLanguage: responseLanguage,
       };
     }
   }
-
-  async recommendVideos(params: {
-    userId: string;
-    sessionId?: string;
-    topic?: string;
-    message?: string;
-    context?: {
-      yearGroup?: string;
-      currentSubject?: string;
-      locale?: string;
-    };
-    maxResults?: number;
-  }) {
-    const topic = (params.topic || params.message || '').trim();
-    if (!topic) {
-      return {
-        query: '',
-        results: [],
-        quality: {
-          weak: true,
-          reason: 'Please share a specific topic first (subject + concept).',
-        },
-      };
-    }
-
-    const previousFeedbackRows = await this.prisma.tutorVideoFeedback.findMany({
-      where: {
-        userId: params.userId,
-        sessionId: params.sessionId,
-        query: topic,
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-      select: { videoId: true, metadata: true },
-    });
-
-    const previousVideoIds = previousFeedbackRows
-      .filter((row) => (row.metadata as any)?.action === 'shown')
-      .map((row) => row.videoId);
-
-    const recommendation = await this.youtubeRecommendations.recommend({
-      topic,
-      subject: params.context?.currentSubject,
-      yearGroup: params.context?.yearGroup,
-      locale: params.context?.locale,
-      maxResults: params.maxResults,
-      previousVideoIds,
-    });
-
-    if (recommendation.results?.length) {
-      await Promise.all(
-        recommendation.results.map((item) =>
-          this.youtubeRecommendations.saveFeedback({
-            userId: params.userId,
-            sessionId: params.sessionId,
-            videoId: item.videoId,
-            query: topic,
-            clicked: false,
-            metadata: { action: 'shown' },
-          }),
-        ),
-      );
-    }
-
-    return recommendation;
-  }
-
-  async saveVideoFeedback(params: {
-    userId: string;
-    sessionId?: string;
-    videoId: string;
-    query: string;
-    clicked?: boolean;
-    helpful?: boolean;
-    reported?: boolean;
-    reason?: string;
-    metadata?: Record<string, any>;
-  }) {
-    return this.youtubeRecommendations.saveFeedback(params);
-  }
-
-  async reportTypo(params: {
-    userId: string;
-    screenId: string;
-    textKey?: string;
-    rawText: string;
-    locale?: string;
-    sessionId?: string;
-    context?: Record<string, any>;
-  }) {
-    const payload = {
-      userId: params.userId,
-      screenId: params.screenId,
-      textKey: params.textKey || null,
-      rawText: params.rawText,
-      locale: params.locale || null,
-      context: {
-        ...(params.context || {}),
-        sessionId: params.sessionId || null,
-      },
-    };
-    const row = await (this.prisma as any).copyIssueReport.create({
-      data: payload,
-      select: { id: true, status: true, createdAt: true },
-    });
-    return {
-      ok: true,
-      reportId: row.id,
-      status: row.status,
-      createdAt: row.createdAt,
-    };
-  }
-
-  async getTutorVideoConfig() {
-    return this.youtubeRecommendations.getConfig();
-  }
-
-  async updateTutorVideoConfig(dto: UpdateTutorVideoConfigDto) {
-    return this.youtubeRecommendations.updateConfig(dto);
-  }
-
-  /**
-   * Get chat history for a session
-   */
-  async getChatHistory(userId: string, sessionId: string) {
-    return this.prisma.chatMessage.findMany({
-      where: {
-        userId,
-        sessionId,
-      },
-      orderBy: { createdAt: 'asc' },
-    });
-  }
-
-  /**
-   * Create a new chat session
-   */
-  async createSession(userId: string) {
-    const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    return { sessionId };
-  }
-
-  /**
-   * Process image message - analyze image and get AI tutor response
-   * Uses GPT-4o Vision for image understanding
-   * Supports: homework help, handwritten answers, school book exercises
-   */
-  async processImageMessage(params: {
-    userId: string;
-    sessionId: string;
-    imagePath: string;
-    userMessage?: string;
-    context?: {
-      yearGroup?: string;
-      currentSubject?: string;
-      purpose?: 'homework_help' | 'answer_submission' | 'general';
-      locale?: string;
-    };
-  }) {
-    if (!this.openai) {
-      throw new Error('OpenAI API key not configured');
-    }
-
-    const imageLanguageInstruction =
-      '\n\nLANGUAGE: Reply only in English for the whole analysis and feedback.';
-
-    try {
-      const imageBuffer = fs.readFileSync(params.imagePath);
-      const base64Image = imageBuffer.toString('base64');
-      const mimeType = this.getImageMimeType(params.imagePath);
-
-      const history = await this.prisma.chatMessage.findMany({
-        where: {
-          userId: params.userId,
-          sessionId: params.sessionId,
-        },
-        orderBy: { createdAt: 'asc' },
-        take: 5,
-      });
-
-      const purpose = params.context?.purpose || 'homework_help';
-      let systemPrompt: string;
-
-      if (purpose === 'homework_help') {
-        systemPrompt = `You are a friendly, supportive AI tutor helping a ${params.context?.yearGroup || ''} student with their studies.
-
-The student has sent you a photo of something they need help with (could be a textbook page, worksheet, homework problem, or handwritten work).
-
-Your role:
-1. First, carefully analyze what's in the image
-2. Identify the subject and type of problem/question
-3. Guide the student through understanding it step by step
-4. DON'T just give the answer - help them learn
-5. Ask guiding questions to check their understanding
-6. Be encouraging and supportive
-
-IMPORTANT - Math Equations:
-- When writing mathematical equations, formulas, or expressions, wrap them in LaTeX format using double dollar signs: $$equation$$
-- For inline math, use single dollar signs: $equation$
-- Examples: $$x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$$ or $2x + 5 = 13$
-- Always use proper LaTeX notation for all mathematical expressions
-
-For equation-heavy answers, present steps clearly: one step per line, final answer clearly marked, and a short check when useful.
-If a visual is required, provide at least a Tier 1 text-based diagram (points/lines/angles or value table + key points for graphs) and then explain what it implies.
-
-${EDUCATION_LEVELS_FOR_AI}
-
-Keep responses concise and age-appropriate. If you can't clearly see or understand something in the image, ask for clarification.${imageLanguageInstruction}`;
-      } else if (purpose === 'answer_submission') {
-        systemPrompt = `You are a friendly, supportive AI tutor reviewing a ${params.context?.yearGroup || ''} student's handwritten answer.
-
-The student has submitted a photo of their written work/answer.
-
-Your role:
-1. Carefully read and understand their handwritten response
-2. Check if the work is correct
-3. If correct, praise them and explain why it's right
-4. If incorrect, gently guide them to find the error themselves
-5. Provide specific, constructive feedback
-6. Suggest next steps for improvement
-
-IMPORTANT - Math Equations:
-- When writing mathematical equations, formulas, or expressions, wrap them in LaTeX format using double dollar signs: $$equation$$
-- For inline math, use single dollar signs: $equation$
-- Examples: $$x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$$ or $2x + 5 = 13$
-- Always use proper LaTeX notation for all mathematical expressions
-
-For equation-heavy answers, present steps clearly: one step per line, final answer clearly marked, and a short check when useful.
-If a visual is required, provide at least a Tier 1 text-based diagram (points/lines/angles or value table + key points for graphs) and then explain what it implies.
-
-${EDUCATION_LEVELS_FOR_AI}
-
-Be encouraging and focus on learning, not just being right or wrong.${imageLanguageInstruction}`;
-      } else {
-        systemPrompt = `You are a helpful AI tutor. Analyze this image and help the student with whatever they need.
-${EDUCATION_LEVELS_FOR_AI}
-
-Keep responses friendly, age-appropriate for a ${params.context?.yearGroup || 'school'} student, and educational.
-Use clear step-by-step equations where relevant (one transformation per line) and provide Tier 1 text-based diagrams when a visual explanation is needed.${imageLanguageInstruction}`;
-      }
-
-      // Build messages array
-      const messages: any[] = [
-        { role: 'system', content: systemPrompt },
-      ];
-
-      // Add recent history for context
-      // Strip any history message containing non-Latin script — same guard as the
-      // main chat path — so a previous bad voice transcription never anchors the
-      // image-message response in a foreign language.
-      history.forEach((msg) => {
-        if (msg.role === 'USER') {
-          if (!this.containsNonLatinScript(msg.content || '')) {
-            messages.push({ role: 'user', content: msg.content });
-          }
-        } else if (msg.role === 'ASSISTANT') {
-          if (!this.containsNonLatinScript(msg.content || '')) {
-            messages.push({ role: 'assistant', content: msg.content });
-          }
-        }
-      });
-
-      // Add current image message with GPT-4o Vision format
-      const userContent: any[] = [
-        {
-          type: 'image_url',
-          image_url: {
-            url: `data:${mimeType};base64,${base64Image}`,
-            detail: 'high', // Use high detail for better text recognition
-          },
-        },
-      ];
-
-      // Add optional text message
-      if (params.userMessage && params.userMessage.trim()) {
-        userContent.unshift({
-          type: 'text',
-          text: params.userMessage,
-        });
-      } else {
-        // Default message based on purpose
-        const defaultMessages = {
-          homework_help: 'I need help with this. Can you explain it to me?',
-          answer_submission: "Here's my answer. Can you check if it's correct?",
-          general: 'What can you tell me about this?',
-        };
-        userContent.unshift({
-          type: 'text',
-          text: defaultMessages[purpose],
-        });
-      }
-
-      messages.push({ role: 'user', content: userContent });
-
-      // Call GPT-4o Vision
-      const response = await this.openai.chat.completions.create({
-        model: OPENAI_CHAT_MODEL,
-        messages,
-        temperature: 0.7,
-        max_tokens: 1000,
-      });
-
-      let aiResponse = response.choices[0].message.content || '';
-      if (this.containsNonLatinScript(aiResponse)) {
-        const englishRewrite = await this.openai.chat.completions.create({
-          model: OPENAI_CHAT_MODEL,
-          messages: [
-            {
-              role: 'system',
-              content:
-                'Convert the given tutor response to clear English only. Keep the educational meaning and remove all non-Latin script.',
-            },
-            {
-              role: 'user',
-              content: aiResponse,
-            },
-          ],
-          temperature: 0.2,
-          max_tokens: 1000,
-        });
-        aiResponse = englishRewrite.choices[0].message.content || aiResponse;
-      }
-
-      // Save user message (with image indicator)
-      const userMessageContent = params.userMessage 
-        ? `[📷 Image] ${params.userMessage}`
-        : `[📷 Image sent for ${purpose === 'homework_help' ? 'homework help' : purpose === 'answer_submission' ? 'answer check' : 'analysis'}]`;
-
-      await this.prisma.chatMessage.create({
-        data: {
-          userId: params.userId,
-          sessionId: params.sessionId,
-          role: 'USER',
-          content: userMessageContent,
-          context: {
-            ...params.context,
-            hasImage: true,
-            imagePurpose: purpose,
-          },
-        },
-      });
-
-      // Save AI response
-      await this.prisma.chatMessage.create({
-        data: {
-          userId: params.userId,
-          sessionId: params.sessionId,
-          role: 'ASSISTANT',
-          content: aiResponse,
-          context: params.context || {},
-          tokenCount: response.usage?.total_tokens || 0,
-        },
-      });
-
-      return {
-        message: aiResponse,
-        sessionId: params.sessionId,
-        imageAnalyzed: true,
-        purpose,
-      };
-    } catch (error) {
-      console.error('Error processing image message:', error);
-      const errorMsg =
-        "I'm having trouble analyzing that image right now. Please try again, or make sure the image is clear and well-lit.";
-      return {
-        message: errorMsg,
-        sessionId: params.sessionId,
-        imageAnalyzed: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
-      };
-    }
-  }
-
-  /**
-   * Helper to determine image MIME type from file path
-   */
-  private getImageMimeType(filePath: string): string {
-    const ext = filePath.toLowerCase().split('.').pop();
-    const mimeTypes: Record<string, string> = {
-      'jpg': 'image/jpeg',
-      'jpeg': 'image/jpeg',
-      'png': 'image/png',
-      'gif': 'image/gif',
-      'webp': 'image/webp',
-    };
-    return mimeTypes[ext || ''] || 'image/jpeg';
-  }
-
-  /**
-   * Translates arbitrary text to English using a lightweight GPT call.
-   * If the text is already English (or the translation call fails), the
-   * original text is returned unchanged so the pipeline is never blocked.
-   */
-  private async translateToEnglish(text: string): Promise<string> {
-    if (!this.openai || !text?.trim()) return text;
-    try {
-      const result = await this.openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You are a translation assistant. If the text is already in English, return it exactly as-is. ' +
-              'If it is in any other language, translate it to fluent English. ' +
-              'Return ONLY the translated (or original) text — no explanation, no prefix, no quotes.',
-          },
-          { role: 'user', content: text },
-        ],
-        temperature: 0,
-        max_tokens: 512,
-      });
-      return result.choices[0].message.content?.trim() || text;
-    } catch {
-      // Never block the pipeline on a translation failure.
-      return text;
-    }
-  }
-
-  private hashTutorText(value: string): string {
-    const normalized = (value || '')
-      .toLowerCase()
-      .replace(/\s+/g, ' ')
-      .replace(/[^\p{L}\p{N}\s?!.,]/gu, '')
-      .trim();
-    let hash = 0;
-    for (let i = 0; i < normalized.length; i++) {
-      hash = (hash << 5) - hash + normalized.charCodeAt(i);
-      hash |= 0;
-    }
-    return `${hash}`;
-  }
-
-  private buildAssumptions(missingFields: TutorMissingField[], locale: 'el' | 'en'): string[] {
-    const assumptions: string[] = [];
-    if (!missingFields.length) return assumptions;
-    if (missingFields.includes('grade')) {
-      assumptions.push(
-        locale === 'el'
-          ? 'Υπόθεση: επίπεδο περίπου μέσης δυσκολίας σχολείου.'
-          : 'Assumption: school-level medium difficulty.',
-      );
-    }
-    if (missingFields.includes('subject')) {
-      assumptions.push(
-        locale === 'el'
-          ? 'Υπόθεση: γενικό θέμα σχετικό με την ερώτηση του μαθητή.'
-          : 'Assumption: general subject inferred from the student question.',
-      );
-    }
-    return assumptions;
-  }
-
-  private detectRepeatedKnownFieldAsk(
-    message: string,
-    state: { grade?: string; subject?: string },
-  ): number {
-    const text = (message || '').toLowerCase();
-    let hits = 0;
-    const asksGrade = /grade|class|year|τάξη|classroom/.test(text);
-    const asksSubject = /subject|topic|μάθημα|θέμα/.test(text);
-    if (state.grade && asksGrade) hits += 1;
-    if (state.subject && asksSubject) hits += 1;
-    return hits;
-  }
-
-  private inferStepFromStructuredContent(content: StructuredTutorContent): TutorFlowStep {
-    if (content.recap) return 'WRAP_UP';
-    if (content.quickCheck) return 'CHECK';
-    if (content.steps?.length || content.finalAnswer) return 'TEACH';
-    if (content.plan) return 'PLAN';
-    // Exercise, examples, and visualAid are teaching content — treat as TEACH
-    // so the flow machine doesn't loop back to CLARIFY when problems are delivered.
-    if (content.exercise || content.examples?.length || content.visualAid || content.exerciseAnswers) return 'TEACH';
-    return 'CLARIFY';
-  }
-
-  private pickMostAdvancedStep(base: TutorFlowStep, inferred: TutorFlowStep): TutorFlowStep {
-    const order: TutorFlowStep[] = ['INTAKE', 'CLARIFY', 'PLAN', 'TEACH', 'CHECK', 'WRAP_UP'];
-    const baseIndex = order.indexOf(base);
-    const inferredIndex = order.indexOf(inferred);
-    return inferredIndex > baseIndex ? inferred : base;
-  }
-
-  private enforceForwardProgress(params: {
-    response: StructuredTutorResponse;
-    state: {
-      grade?: string;
-      subject?: string;
-      clarificationCount: number;
-      flowStep: TutorFlowStep;
-    };
-    missingFields: TutorMissingField[];
-    assumptionsUsed: string[];
-    learningMode: 'hints' | 'full_solution';
-    locale: 'el' | 'en';
-  }): StructuredTutorResponse {
-    const { response, state, missingFields, assumptionsUsed, learningMode, locale } = params;
-    const text = (response.message || '').toLowerCase();
-    const repeatedKnownFieldAsk = this.detectRepeatedKnownFieldAsk(response.message, state) > 0;
-    const asksForExerciseAgain = /send the exercise|στείλε την άσκηση|i need the exercise/.test(text);
-    // hasProgress must cover ALL content-bearing fields.
-    // Previously it only checked plan/steps/hints/quickCheck, so a response that
-    // contained ONLY exercises, examples, finalAnswer, recap or visualAid was
-    // treated as "no progress" and the entire AI answer was silently replaced with
-    // the forward-progress fallback — making all problems invisible.
-    const hasProgress =
-      Boolean(response.structuredContent.plan) ||
-      Boolean(response.structuredContent.steps?.length) ||
-      Boolean(response.structuredContent.hints?.length) ||
-      Boolean(response.structuredContent.quickCheck) ||
-      Boolean(response.structuredContent.exercise) ||
-      Boolean(response.structuredContent.examples?.length) ||
-      Boolean(response.structuredContent.exerciseAnswers) ||
-      Boolean(response.structuredContent.finalAnswer) ||
-      Boolean(response.structuredContent.recap) ||
-      Boolean(response.structuredContent.visualAid) ||
-      Boolean(response.structuredContent.commonMistakes?.length);
-
-    // Always pass through when the AI produced real content (steps, plan, hints, etc.).
-    // repeatedKnownFieldAsk must NOT discard a response that has actual content —
-    // e.g. "give me practice problems on this topic" contains "topic" which would
-    // previously trigger repeatedKnownFieldAsk and silently replace all problems
-    // with the generic fallback text.
-    if (hasProgress) {
-      return response;
-    }
-    if (!repeatedKnownFieldAsk && !asksForExerciseAgain && state.flowStep === 'CLARIFY') {
-      return response;
-    }
-
-    const assumptionLine = assumptionsUsed.length
-      ? assumptionsUsed.join(locale === 'el' ? ' ' : ' | ')
-      : locale === 'el'
-        ? 'Υπόθεση: βασικό σχολικό επίπεδο.'
-        : 'Assumption: standard school level.';
-    const nextInfo = missingFields.length
-      ? locale === 'el'
-        ? `Για πιο ακριβή λύση, στείλε στη συνέχεια: ${missingFields.join(', ')}.`
-        : `To improve accuracy next, share: ${missingFields.join(', ')}.`
-      : locale === 'el'
-        ? 'Αν θέλεις, στείλε την ακριβή εκφώνηση για ακόμη πιο στοχευμένη βοήθεια.'
-        : 'If you want, send the exact exercise text for even more targeted help.';
-
-    if (learningMode === 'hints') {
-      return {
-        message:
-          locale === 'el'
-            ? 'Προχωράμε με υπόθεση και ένα πρακτικό επόμενο βήμα.'
-            : 'Let us move forward with assumptions and a practical next step.',
-        structuredContent: {
-          plan:
-            locale === 'el'
-              ? '1) Εντοπίζουμε τι ζητείται 2) Επιλέγουμε κανόνα 3) Ελέγχουμε αποτέλεσμα.'
-              : '1) Identify what is asked 2) choose the rule 3) verify the result.',
-          hints: [
-            assumptionLine,
-            locale === 'el'
-              ? 'Γράψε πρώτα τα δεδομένα της άσκησης σε μία γραμμή.'
-              : 'Write the known values from the problem in one line first.',
-          ],
-          quickCheck: nextInfo,
-          recap:
-            locale === 'el'
-              ? 'Δεν μένουμε σε βρόχο: κάνουμε επόμενο σαφές βήμα τώρα.'
-              : 'No loop: we take the next concrete step now.',
-        },
-      };
-    }
-
-    return {
-      message:
-        locale === 'el'
-          ? 'Συνεχίζω με λογικές υποθέσεις και πλήρη καθοδήγηση.'
-          : 'I will proceed with reasonable assumptions and full guidance.',
-      structuredContent: {
-        plan:
-          locale === 'el'
-            ? 'Λύνουμε με γενική μεθοδολογία και μετά κάνουμε γρήγορο έλεγχο.'
-            : 'Solve with a general method and then run a quick check.',
-        steps: [
-          locale === 'el'
-            ? 'Κατέγραψε τα γνωστά δεδομένα και το ζητούμενο.'
-            : 'List the known data and the target.',
-          locale === 'el'
-            ? 'Εφάρμοσε τον βασικό κανόνα ή τύπο βήμα-βήμα.'
-            : 'Apply the core rule or formula step by step.',
-          locale === 'el'
-            ? 'Κάνε έλεγχο αντικατάστασης ή λογικής συνέπειας.'
-            : 'Do a substitution or reasoning check.',
-        ],
-        finalAnswer: nextInfo,
-        quickCheck: assumptionLine,
-        recap:
-          locale === 'el'
-            ? 'Προχωρήσαμε με πρόοδο χωρίς να επαναλάβουμε την ίδια ερώτηση.'
-            : 'We moved forward without repeating the same question.',
-      },
-    };
-  }
-
-  private buildStructuredTutorFallback(rawContent: string): StructuredTutorResponse {
-    const fallbackText =
-      "I couldn't format that answer. Please try again with the same question.";
-
-    try {
-      const parsed = JSON.parse(rawContent);
-      const normalized = this.sanitizeStructuredTutorPayload(parsed);
-      const message = normalized.message || this.stringifyStructuredTutorContent(normalized.structuredContent);
-      return {
-        message: message || fallbackText,
-        structuredContent: normalized.structuredContent,
-      };
-    } catch (error) {
-      const plain = rawContent?.trim();
-      return {
-        message: plain || fallbackText,
-        structuredContent: {
-          plan: plain || fallbackText,
-        },
-      };
-    }
-  }
-
-  private sanitizeStructuredTutorPayload(payload: any): StructuredTutorResponse {
-    const sectionSource = payload?.structuredContent || payload || {};
-
-    const steps = this.toStringArray(sectionSource.steps);
-    let visualAid = typeof sectionSource.visualAid === 'string' ? sectionSource.visualAid : undefined;
-
-    // ── Rescue: GPT sometimes puts practice problems in visualAid as a
-    //    numbered string ("1. Calculate…\n2. Solve…\n…") instead of putting
-    //    them in the steps array.  Detect this pattern and move the items to
-    //    steps so they render as individual problem cards.
-    //    We only do this when steps is absent or contains only generic
-    //    methodology phrases (no actual problems), so we never clobber real steps.
-    if (visualAid) {
-      const visualLines = visualAid
-        .split('\n')
-        .map((l) => l.trim())
-        .filter(Boolean);
-      const isNumberedProblemList =
-        visualLines.length >= 2 &&
-        visualLines.filter((l) => /^\d+[\.\)]\s+\S/.test(l)).length >= Math.floor(visualLines.length * 0.6);
-
-      if (isNumberedProblemList) {
-        const rescuedProblems = visualLines.filter((l) => /^\d+[\.\)]\s+\S/.test(l));
-        // Only replace steps if current steps look generic (no arithmetic or
-        // question marks) or are absent.
-        const stepsLookGeneric =
-          !steps?.length ||
-          steps.every((s) => !/\d/.test(s) && !s.includes('?'));
-        if (stepsLookGeneric) {
-          this.logger.warn(
-            `[sanitize] Rescuing ${rescuedProblems.length} problems from visualAid → steps`,
-          );
-          steps.push(...rescuedProblems);
-          visualAid = undefined;
-        }
-      }
-    }
-
-    const structuredContent: StructuredTutorContent = {
-      plan: typeof sectionSource.plan === 'string' ? sectionSource.plan : undefined,
-      hints: this.toStringArray(sectionSource.hints),
-      steps,
-      examples: this.toStringArray(sectionSource.examples),
-      exercise: typeof sectionSource.exercise === 'string' ? sectionSource.exercise : undefined,
-      exerciseAnswers:
-        typeof sectionSource.exerciseAnswers === 'string' ? sectionSource.exerciseAnswers : undefined,
-      finalAnswer:
-        typeof sectionSource.finalAnswer === 'string' ? sectionSource.finalAnswer : undefined,
-      quickCheck: typeof sectionSource.quickCheck === 'string' ? sectionSource.quickCheck : undefined,
-      commonMistakes: this.toStringArray(sectionSource.commonMistakes),
-      recap: typeof sectionSource.recap === 'string' ? sectionSource.recap : undefined,
-      visualAid,
-    };
-
-    return {
-      message: typeof payload?.message === 'string' ? payload.message : '',
-      structuredContent,
-    };
-  }
-
-  private stringifyStructuredTutorContent(structuredContent: StructuredTutorContent): string {
-    const segments: string[] = [];
-    if (structuredContent.plan) segments.push(`Plan: ${structuredContent.plan}`);
-    if (structuredContent.hints?.length) segments.push(`Hints: ${structuredContent.hints.join(' ')}`);
-    if (structuredContent.steps?.length) segments.push(`Steps: ${structuredContent.steps.join(' ')}`);
-    if (structuredContent.examples?.length) segments.push(`Examples: ${structuredContent.examples.join(' ')}`);
-    if (structuredContent.exercise) segments.push(`Exercise: ${structuredContent.exercise}`);
-    if (structuredContent.exerciseAnswers) segments.push(`Answers: ${structuredContent.exerciseAnswers}`);
-    if (structuredContent.finalAnswer) segments.push(`Final answer: ${structuredContent.finalAnswer}`);
-    if (structuredContent.quickCheck) segments.push(`Quick check: ${structuredContent.quickCheck}`);
-    if (structuredContent.commonMistakes?.length) {
-      segments.push(`Common mistakes: ${structuredContent.commonMistakes.join(' ')}`);
-    }
-    if (structuredContent.recap) segments.push(`Recap: ${structuredContent.recap}`);
-    return segments.join('\n');
-  }
-
-  private async requestStructuredTutorCompletion(
-    messages: any[],
-    options?: { maxTokens?: number; temperature?: number },
-  ): Promise<{
-    parsed: StructuredTutorResponse;
-    tokenCount: number;
-  }> {
-    const maxTokens = options?.maxTokens ?? 2500;
-    const response = await this.openai.chat.completions.create({
-      model: OPENAI_CHAT_MODEL,
-      messages,
-      temperature: options?.temperature ?? 0.8,
-      // Raised from 520/900: six math problems with working need ~2 000 tokens.
-      // A truncated JSON response silently discards all content after the cut-off.
-      max_tokens: maxTokens,
-      response_format: { type: 'json_object' },
-    });
-
-    const choice = response.choices[0];
-    let aiResponse = choice.message.content || '';
-    let tokenCount = response.usage?.total_tokens || 0;
-
-    // If the model hit the token limit mid-JSON the output is incomplete and
-    // cannot be parsed.  Retry once with a higher ceiling rather than silently
-    // returning an empty structuredContent to the student.
-    if (choice.finish_reason === 'length') {
-      this.logger.warn(
-        `[requestStructuredTutorCompletion] finish_reason=length at max_tokens=${maxTokens}; retrying with ${maxTokens + 1500} tokens`,
-      );
-      const retry = await this.openai.chat.completions.create({
-        model: OPENAI_CHAT_MODEL,
-        messages,
-        temperature: options?.temperature ?? 0.8,
-        max_tokens: maxTokens + 1500,
-        response_format: { type: 'json_object' },
-      });
-      aiResponse = retry.choices[0].message.content || '';
-      tokenCount += retry.usage?.total_tokens || 0;
-    }
-
-    return {
-      parsed: this.buildStructuredTutorFallback(aiResponse),
-      tokenCount,
-    };
-  }
-
-  private applyTutorQualityFilter(
-    parsed: StructuredTutorResponse,
-    locale?: string,
-  ): { filtered: StructuredTutorResponse; quality: TutorQualityAssessment } {
-    const normalizedMessage = this.normalizeTutorText(parsed.message || '');
-    const normalizedStructured = this.normalizeStructuredContent(parsed.structuredContent);
-    const filtered: StructuredTutorResponse = {
-      message: normalizedMessage.text || this.stringifyStructuredTutorContent(normalizedStructured.content),
-      structuredContent: normalizedStructured.content,
-    };
-
-    const aggregateText = [
-      filtered.message,
-      filtered.structuredContent.plan,
-      ...(filtered.structuredContent.hints || []),
-      ...(filtered.structuredContent.steps || []),
-      ...(filtered.structuredContent.examples || []),
-      filtered.structuredContent.exercise,
-      filtered.structuredContent.exerciseAnswers,
-      filtered.structuredContent.finalAnswer,
-      filtered.structuredContent.quickCheck,
-      ...(filtered.structuredContent.commonMistakes || []),
-      filtered.structuredContent.recap,
-      filtered.structuredContent.visualAid,
-    ]
-      .filter(Boolean)
-      .join(' ');
-
-    const quality = this.assessTutorTextQuality(aggregateText, locale);
-    quality.correctionsApplied +=
-      normalizedMessage.correctionsApplied + normalizedStructured.correctionsApplied;
-    return { filtered, quality };
-  }
-
-  private normalizeStructuredContent(
-    structuredContent: StructuredTutorContent,
-  ): { content: StructuredTutorContent; correctionsApplied: number } {
-    let correctionsApplied = 0;
-    const normalize = (value?: string) => {
-      if (!value) return undefined;
-      const normalized = this.normalizeTutorText(value);
-      correctionsApplied += normalized.correctionsApplied;
-      return normalized.text;
-    };
-    const normalizeArray = (value?: string[]) => {
-      if (!value?.length) return undefined;
-      return value
-        .map((entry) => normalize(entry))
-        .filter((entry): entry is string => typeof entry === 'string' && entry.length > 0);
-    };
-
-    return {
-      content: {
-        plan: normalize(structuredContent.plan),
-        hints: normalizeArray(structuredContent.hints),
-        steps: normalizeArray(structuredContent.steps),
-        examples: normalizeArray(structuredContent.examples),
-        exercise: normalize(structuredContent.exercise),
-        exerciseAnswers: normalize(structuredContent.exerciseAnswers),
-        finalAnswer: normalize(structuredContent.finalAnswer),
-        quickCheck: normalize(structuredContent.quickCheck),
-        commonMistakes: normalizeArray(structuredContent.commonMistakes),
-        recap: normalize(structuredContent.recap),
-        visualAid: normalize(structuredContent.visualAid),
-      },
-      correctionsApplied,
-    };
-  }
-
-  private normalizeTutorText(text: string): { text: string; correctionsApplied: number } {
-    let normalized = text;
-    let correctionsApplied = 0;
-    for (const rule of this.controlledCorrections) {
-      normalized = normalized.replace(rule.pattern, () => {
-        correctionsApplied += 1;
-        return rule.replacement;
-      });
-    }
-    return { text: normalized, correctionsApplied };
-  }
-
-  private assessTutorTextQuality(text: string, locale?: string): TutorQualityAssessment {
-    const issues: string[] = [];
-    let score = 100;
-
-    const suspiciousMatches = text.match(/\uFFFD|Ã|Î|Ï|Ð|Ñ|â€™|â€œ|â€\x9d|â€"|â€"/g) || [];
-    if (suspiciousMatches.length > 0) {
-      issues.push('suspicious_encoding');
-      score -= 35;
-    }
-
-    const mixedTokens = this.extractMixedScriptTokens(text);
-    if (mixedTokens.length > 0) {
-      issues.push('mixed_script_tokens');
-      score -= Math.min(30, mixedTokens.length * 6);
-    }
-
-    const tutorExpectsEnglish = !locale || locale === TUTOR_RESPONSE_LOCALE_FOR_QUALITY || /^en/i.test(locale);
-    if (tutorExpectsEnglish) {
-      const letterCount = (text.match(/\p{L}/gu) || []).length;
-      // Check ANY non-Latin, non-Common script — not just Greek.
-      const nonLatinRatio = this.computeNonLatinCharacterRatio(text);
-      if (letterCount >= 40 && nonLatinRatio > 0.4) {
-        issues.push('dominant_non_english_script');
-        score -= 28;
-      }
-    }
-
-    const knownBadCount = this.controlledCorrections.reduce((count, rule) => {
-      const matches = text.match(rule.pattern);
-      return count + (matches ? matches.length : 0);
-    }, 0);
-    if (knownBadCount > 0) {
-      issues.push('known_bad_terms');
-      score -= Math.min(20, knownBadCount * 5);
-    }
-
-    return {
-      score: Math.max(0, score),
-      lowQuality: score < 65 || issues.includes('suspicious_encoding'),
-      issues,
-      correctionsApplied: 0,
-    };
-  }
-
-  private extractMixedScriptTokens(text: string): string[] {
-    const tokens = text.match(/[\p{L}\p{M}\p{Nd}_-]{2,}/gu) || [];
-    return tokens.filter((token) => {
-      let hasNonLatin = false;
-      let hasLatin = false;
-      for (const char of token) {
-        if (/\p{Script=Latin}/u.test(char)) hasLatin = true;
-        else if (/\p{L}/u.test(char)) hasNonLatin = true;
-        if (hasNonLatin && hasLatin) return true;
-      }
-      return false;
-    });
-  }
-
-  /**
-   * Returns the ratio of non-Latin letters in `text`.
-   * Covers Greek, Cyrillic, Arabic, Devanagari, CJK, Hebrew, Thai, etc.
-   */
-  private computeNonLatinCharacterRatio(text: string): number {
-    const letters = text.match(/\p{L}/gu) || [];
-    if (letters.length === 0) return 0;
-    const nonLatinLetters = letters.filter((char) => !/\p{Script=Latin}/u.test(char));
-    return nonLatinLetters.length / letters.length;
-  }
-
-  /** @deprecated Use computeNonLatinCharacterRatio for broader coverage. Kept for legacy callers. */
-  private computeGreekCharacterRatio(text: string): number {
-    const letters = text.match(/\p{L}/gu) || [];
-    if (letters.length === 0) return 0;
-    const greekLetters = letters.filter((char) => /\p{Script=Greek}/u.test(char));
-    return greekLetters.length / letters.length;
-  }
-
-  /**
-   * Returns true if `text` contains ANY non-Latin script character
-   * (Greek, Cyrillic, Arabic, Devanagari, CJK, Hebrew, Thai, etc.).
-   * Used to detect a non-English script leaking into a tutor reply.
-   */
-  private containsNonLatinScript(text: string): boolean {
-    return /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}\s\d\p{P}\p{S}]/u.test(text || '');
-  }
-
-
-  private collectTutorResponseText(response: StructuredTutorResponse): string {
-    return [
-      response.message,
-      response.structuredContent?.plan,
-      ...(response.structuredContent?.hints || []),
-      ...(response.structuredContent?.steps || []),
-      ...(response.structuredContent?.examples || []),
-      response.structuredContent?.exercise,
-      response.structuredContent?.exerciseAnswers,
-      response.structuredContent?.finalAnswer,
-      response.structuredContent?.quickCheck,
-      ...(response.structuredContent?.commonMistakes || []),
-      response.structuredContent?.recap,
-      response.structuredContent?.visualAid,
-    ]
-      .filter(Boolean)
-      .join(' ');
-  }
-
-  private toStringArray(value: unknown): string[] | undefined {
-    if (Array.isArray(value)) {
-      const normalized = value.filter((entry) => typeof entry === 'string').map((entry) => entry.trim());
-      return normalized.filter(Boolean).length ? normalized.filter(Boolean) : undefined;
-    }
-    if (typeof value === 'string') {
-      const lines = value
-        .split(/\r?\n/)
-        .map((line) => line.trim().replace(/^[\-\*\u2022]\s*/, '').replace(/^\d+[\.\)]\s*/, '').trim())
-        .filter(Boolean);
-      if (lines.length > 1) return lines;
-      if (lines.length === 1) return [lines[0]];
-      return undefined;
-    }
-    return undefined;
-  }
-
-  private async synthesizeSpeechAudio(
-    input: string,
-    voice: ReturnType<typeof resolveOpenAiTtsVoice>,
-    speed: number,
-  ): Promise<Buffer> {
-    let lastError: unknown;
-    for (const model of OPENAI_TTS_MODELS) {
-      try {
-        const audioResponse = await this.openai.audio.speech.create({
-          model,
-          voice,
-          speed,
-          response_format: 'mp3',
-          input,
-        });
-        return Buffer.from(await audioResponse.arrayBuffer());
-      } catch (error) {
-        lastError = error;
-        this.logger.warn(`TTS synthesis failed with model ${model}: ${error}`);
-      }
-    }
-    throw lastError instanceof Error ? lastError : new Error('Tutor speech synthesis failed');
-  }
-
-  async generateTutorSpeech(params: {
-    userId: string;
-    sessionId?: string;
-    text: string;
-    locale?: string;
-    learningMode?: 'hints' | 'full_solution';
-    voice?: OpenAiTtsVoice | 'verse' | 'aria';
-    speed?: number;
-    structuredContent?: StructuredTutorContent;
-  }) {
-    if (!this.openai) {
-      throw new Error('OpenAI API key not configured');
-    }
-
-    const locale = TUTOR_RESPONSE_LOCALE_FOR_QUALITY;
-    const isGreek = false;
-    const speed = Math.max(0.8, Math.min(1.2, params.speed ?? 1.0));
-    const voice = resolveOpenAiTtsVoice(params.voice);
-    const sections = this.buildSpeechSections(
-      params.text,
-      params.structuredContent,
-      params.learningMode || 'full_solution',
-      isGreek,
-    );
-
-    const chunks: TutorSpeechChunk[] = [];
-
-    for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex += 1) {
-      const section = sections[sectionIndex];
-      const subChunks = this.splitIntoSpeechChunks(section.text, 320);
-
-      for (let subIndex = 0; subIndex < subChunks.length; subIndex += 1) {
-        const normalized = this.prepareSpeechText(subChunks[subIndex], isGreek);
-        if (!normalized) continue;
-        const audioBuffer = await this.synthesizeSpeechAudio(normalized, voice, speed);
-        chunks.push({
-          id: `chunk_${sectionIndex}_${subIndex}`,
-          title:
-            subChunks.length > 1
-              ? `${section.title} ${isGreek ? 'μέρος' : 'part'} ${subIndex + 1}`
-              : section.title,
-          text: subChunks[subIndex],
-          audioBase64: audioBuffer.toString('base64'),
-          mimeType: 'audio/mpeg',
-          estimatedDurationMs: this.estimateSpeechDurationMs(normalized, speed),
-        });
-      }
-    }
-
-    if (!chunks.length) {
-      throw new Error('No speakable tutor content available for speech synthesis');
-    }
-
-    return {
-      ok: true,
-      sessionId: params.sessionId || null,
-      locale,
-      voice,
-      speed,
-      totalChunks: chunks.length,
-      chunks,
-    };
-  }
-
-  private buildSpeechSections(
-    text: string,
-    structuredContent: StructuredTutorContent | undefined,
-    learningMode: 'hints' | 'full_solution',
-    isGreek: boolean,
-  ): Array<{ title: string; text: string }> {
-    const sections: Array<{ title: string; text: string }> = [];
-    const add = (title: string, value?: string) => {
-      if (!value || !value.trim()) return;
-      sections.push({ title, text: value.trim() });
-    };
-
-    const addList = (title: string, values?: string[]) => {
-      if (!values?.length) return;
-      const rendered = values
-        .map((entry, idx) => `${isGreek ? 'Σημείο' : 'Point'} ${idx + 1}: ${entry}`)
-        .join('. ');
-      sections.push({ title, text: rendered });
-    };
-
-    const labels = isGreek
-      ? {
-          answer: 'Απάντηση',
-          plan: 'Πλάνο',
-          hints: 'Υποδείξεις',
-          steps: 'Βήματα',
-          finalAnswer: 'Τελική απάντηση',
-          quickCheck: 'Γρήγορος έλεγχος',
-          recap: 'Ανακεφαλαίωση',
-          commonMistakes: 'Συχνά λάθη',
-        }
-      : {
-          answer: 'Answer',
-          plan: 'Plan',
-          hints: 'Hints',
-          steps: 'Steps',
-          finalAnswer: 'Final answer',
-          quickCheck: 'Quick check',
-          recap: 'Recap',
-          commonMistakes: 'Common mistakes',
-        };
-
-    if (structuredContent) {
-      if (learningMode === 'hints') {
-        add(labels.plan, structuredContent.plan);
-        addList(labels.hints, structuredContent.hints);
-        add(labels.quickCheck, structuredContent.quickCheck);
-      } else {
-        add(labels.plan, structuredContent.plan);
-        addList(labels.steps, structuredContent.steps);
-        add(labels.finalAnswer, structuredContent.finalAnswer);
-        add(labels.quickCheck, structuredContent.quickCheck);
-      }
-      addList(labels.commonMistakes, structuredContent.commonMistakes);
-      add(labels.recap, structuredContent.recap);
-    }
-
-    if (sections.length === 0) {
-      add(labels.answer, text);
-    }
-
-    return sections;
-  }
-
-  private splitIntoSpeechChunks(text: string, maxChars: number): string[] {
-    const normalized = text.replace(/\s+/g, ' ').trim();
-    if (!normalized) return [];
-    if (normalized.length <= maxChars) return [normalized];
-
-    const sentences = normalized.split(/(?<=[.!?;·])\s+/).filter(Boolean);
-    if (sentences.length <= 1) {
-      const parts: string[] = [];
-      let cursor = 0;
-      while (cursor < normalized.length) {
-        parts.push(normalized.slice(cursor, cursor + maxChars));
-        cursor += maxChars;
-      }
-      return parts;
-    }
-
-    const chunks: string[] = [];
-    let current = '';
-    for (const sentence of sentences) {
-      const next = current ? `${current} ${sentence}` : sentence;
-      if (next.length > maxChars && current) {
-        chunks.push(current);
-        current = sentence;
-      } else {
-        current = next;
-      }
-    }
-    if (current) chunks.push(current);
-    return chunks;
-  }
-
-  private prepareSpeechText(text: string, isGreek: boolean): string {
-    let out = text;
-
-    out = out.replace(/\$\$([\s\S]*?)\$\$/g, '$1');
-    out = out.replace(/(?<!\$)\$([^$\n]+?)\$(?!\$)/g, '$1');
-
-    out = out.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, (_, numerator: string, denominator: string) =>
-      this.formatFractionForSpeech(numerator, denominator, isGreek),
-    );
-    out = out.replace(/(\d+)\s*\/\s*(\d+)/g, (_, numerator: string, denominator: string) =>
-      this.formatFractionForSpeech(numerator, denominator, isGreek),
-    );
-    out = out.replace(/\\sqrt\{([^{}]+)\}/g, (_, value: string) =>
-      isGreek ? `τετραγωνική ρίζα του ${value}` : `square root of ${value}`,
-    );
-    out = out.replace(/\(([^()]+)\)\s*\^2/g, (_, value: string) =>
-      isGreek ? `${value}, όλο στο τετράγωνο` : `${value}, all squared`,
-    );
-    out = out.replace(
-      /([A-Za-zΑ-Ωα-ω0-9]+)\s*\^2\b/g,
-      (_, base: string) => (isGreek ? `${base} στο τετράγωνο` : `${base} squared`),
-    );
-    out = out.replace(
-      /([A-Za-zΑ-Ωα-ω0-9]+)\s*\^3\b/g,
-      (_, base: string) => (isGreek ? `${base} στον κύβο` : `${base} cubed`),
-    );
-    out = out.replace(
-      /([A-Za-zΑ-Ωα-ω0-9]+)\s*\^([4-9]|[1-9][0-9]+)\b/g,
-      (_, base: string, power: string) =>
-        isGreek ? `${base} στη δύναμη ${power}` : `${base} to the power of ${power}`,
-    );
-
-    out = out.replace(/\bm\/s\b/g, isGreek ? 'μέτρα ανά δευτερόλεπτο' : 'meters per second');
-    out = out.replace(/\bN\b/g, isGreek ? 'Νιούτον' : 'newtons');
-    out = out.replace(/\bJ\b/g, isGreek ? 'Τζάουλ' : 'joules');
-
-    // Only replace operator symbols when they appear in arithmetic context
-    // (surrounded by digits/spaces), not inside hyphenated words or contractions.
-    out = out
-      .replace(/(?<=\s|^)=(?=\s|$)/g, isGreek ? ' ισούται με ' : ' equals ')
-      .replace(/[×]/g, isGreek ? ' επί ' : ' times ')
-      .replace(/(?<=[\d\s])-(?=[\d\s])/g, isGreek ? ' μείον ' : ' minus ')
-      .replace(/(?<=[\d\s])\+(?=[\d\s])/g, isGreek ? ' συν ' : ' plus ');
-
-    out = out.replace(/\s+/g, ' ').trim();
-    return out;
-  }
-
-  private formatFractionForSpeech(numerator: string, denominator: string, isGreek: boolean) {
-    const simpleFractions: Record<string, { en: string; el: string }> = {
-      '1/2': { en: 'one half', el: 'ένα δεύτερο' },
-      '1/3': { en: 'one third', el: 'ένα τρίτο' },
-      '2/3': { en: 'two thirds', el: 'δύο τρίτα' },
-      '1/4': { en: 'one quarter', el: 'ένα τέταρτο' },
-      '3/4': { en: 'three quarters', el: 'τρία τέταρτα' },
-    };
-    const key = `${numerator}/${denominator}`;
-    const known = simpleFractions[key];
-    if (known) return isGreek ? known.el : known.en;
-    return isGreek
-      ? `${numerator} προς ${denominator}`
-      : `${numerator} over ${denominator}`;
-  }
-
-  private estimateSpeechDurationMs(text: string, speed: number): number {
-    const words = text.split(/\s+/).filter(Boolean).length;
-    const baseWordsPerMinute = 145;
-    const minutes = words / (baseWordsPerMinute * speed);
-    return Math.max(1800, Math.round(minutes * 60 * 1000));
-  }
-
-  /**
-   * Process voice message - transcribe audio and get AI response
-   * Uses OpenAI Whisper for speech-to-text
-   */
-  async processVoiceMessage(params: {
-    userId: string;
-    sessionId: string;
-    audioFilePath: string;
-    context?: {
-      yearGroup?: string;
-      currentSubject?: string;
-      locale?: string;
-      preferFastResponses?: boolean;
-      grade?: string;
-      chapter?: string;
-      learningMode?: 'hints' | 'full_solution';
-      explainDepth?: 'short' | 'normal' | 'detailed';
-    };
-  }) {
-    if (!this.openai) {
-      throw new Error('OpenAI API key not configured');
-    }
-
-    try {
-      // ─────────────────────────────────────────────────────────────────────
-      // STEP 1: Speech-to-text transcription
-      //
-      // Model: gpt-4o-transcribe (OpenAI's latest, 2025).
-      //   • Far better than whisper-1 at handling accented English.
-      //   • language:'en'  forces English output regardless of the speaker's
-      //     accent — the model will NEVER switch to another language/script.
-      //   • prompt primes the vocabulary weighting away from non-Latin scripts.
-      //
-      // Fallback: if gpt-4o-transcribe is unavailable we retry with whisper-1
-      //   using the same language pin and prompt.
-      //
-      // Post-transcription guard: even after all of the above, if the returned
-      //   text contains ANY non-Latin characters (Chinese, Arabic, Greek, etc.)
-      //   we reject it immediately — it is never shown to the user and never
-      //   forwarded to GPT.
-      // ─────────────────────────────────────────────────────────────────────
-
-      const transcribeWithModel = async (model: string): Promise<string> => {
-        const audioFile = fs.createReadStream(params.audioFilePath);
-        const result = await this.openai.audio.transcriptions.create({
-          file: audioFile,
-          model,
-          // Forces English output — the model must not switch to any other
-          // language or script based on the speaker's accent.
-          language: 'en',
-          // Primes the model's output vocabulary toward English words.
-          // This is an additional signal on top of language:'en'.
-          prompt: 'The student is speaking English to a tutor. Transcribe only in English, exactly as spoken.',
-          // Plain text — no timestamps or extra metadata, just the transcript.
-          response_format: 'text',
-        });
-        // The SDK returns the text directly when response_format is 'text'.
-        return typeof result === 'string' ? result : (result as any).text ?? '';
-      };
-
-      let transcribedText = '';
-      try {
-        transcribedText = await transcribeWithModel(OPENAI_WHISPER_MODEL);
-      } catch (primaryError) {
-        this.logger.warn(
-          `gpt-4o-transcribe failed, falling back to ${OPENAI_WHISPER_FALLBACK_MODEL}: ${primaryError}`,
-        );
-        transcribedText = await transcribeWithModel(OPENAI_WHISPER_FALLBACK_MODEL);
-      }
-
-      if (!transcribedText || transcribedText.trim().length === 0) {
-        return {
-          transcription: '',
-          message: "I couldn't hear that clearly. Please try speaking again.",
-          sessionId: params.sessionId,
-        };
-      }
-
-      // ── Non-Latin script guard ────────────────────────────────────────────
-      // If the transcription contains ANY non-Latin characters despite the
-      // language pin (e.g. Chinese, Arabic, Greek, Cyrillic), reject it.
-      // The foreign text is never shown in the student bubble and never saved
-      // to the database — so it cannot anchor future GPT replies in that language.
-      if (this.containsNonLatinScript(transcribedText.trim())) {
-        this.logger.warn(
-          `Transcription rejected: non-Latin script detected (model=${OPENAI_WHISPER_MODEL})`,
-        );
-        return {
-          transcription: '',
-          message:
-            'It looks like the audio was transcribed in a different language. Please speak clearly in English and try again.',
-          sessionId: params.sessionId,
-        };
-      }
-
-      // Step 2: AI tutor response
-      //
-      // The transcription is already English (Whisper pins language:'en'), so
-      // skip the translateToEnglish() round-trip that chat() normally runs on
-      // every message.  That call:
-      //   (a) adds ~2–3 s of latency on every voice turn, and
-      //   (b) uses max_tokens:512 which silently truncates long transcriptions
-      //       (e.g. "I am studying X, Y, Z … please give me six problems")
-      //       before they reach the tutor model — producing a garbled or
-      //       incomplete request and causing the AI to respond with only an
-      //       intro sentence and empty structuredContent.
-      //
-      // We inject the transcription directly as the message, bypassing the
-      // translation step by patching the context flag used inside chat().
-      this.logger.log(
-        `[voice] transcription="${transcribedText.slice(0, 120)}" len=${transcribedText.length}`,
-      );
-
-      const chatResponse = await this.chat({
-        userId: params.userId,
-        sessionId: params.sessionId,
-        message: transcribedText,
-        context: {
-          ...params.context,
-          // Signal that the message is already in English — the chat() method
-          // will skip translateToEnglish() when this flag is set.
-          _skipTranslation: true,
-        } as any,
-      });
-
-      this.logger.log(
-        `[voice] structuredFields=${Object.keys(chatResponse.structuredContent || {}).filter((k) => {
-          const v = (chatResponse.structuredContent as any)[k];
-          return Array.isArray(v) ? v.length > 0 : Boolean(v);
-        }).join(',')}`,
-      );
-
-      return {
-        transcription: transcribedText,
-        message: chatResponse.message,
-        structuredContent: chatResponse.structuredContent,
-        sessionId: params.sessionId,
-      };
-    } catch (error) {
-      console.error('Error processing voice message:', error);
-      
-      // Check if it's an OpenAI API error
-      if (error instanceof Error && error.message.includes('Invalid file format')) {
-        return {
-          transcription: '',
-          message:
-            'Sorry, there was a problem with the audio format. Please try recording again.',
-          sessionId: params.sessionId,
-        };
-      }
-
-      return {
-        transcription: '',
-        message:
-          "I'm having trouble processing your voice message right now. Please try typing instead.",
-        sessionId: params.sessionId,
-      };
-    }
-  }
-
-  /**
-   * Generate motivational message based on student progress
-   */
-  async generateMotivationalMessage(userId: string) {
-    // Get recent progress
-    const recentSessions = await (this.prisma as any).learningSession.findMany({
-      where: { userId },
-      orderBy: { startedAt: 'desc' },
-      take: 5,
-      include: {
-        sessionItems: true,
-      },
-    });
-
-    if (recentSessions.length === 0) {
-      return {
-        message: "Let's get started! Every learning journey begins with a single step.",
-        type: 'welcome',
-      };
-    }
-
-    // Check for streak
-    const sessionDates = recentSessions.map((s) =>
-      s.startedAt.toISOString().split('T')[0],
-    );
-    const uniqueDates = new Set(sessionDates);
-
-    if (uniqueDates.size >= 3) {
-      return {
-        message: `Amazing! You've practiced on ${uniqueDates.size} different days this week! 🌟`,
-        type: 'streak',
-      };
-    }
-
-    // Check recent performance
-    const recentItems = recentSessions
-      .flatMap((s) => s.sessionItems)
-      .filter((item) => item.isCorrect !== null);
-
-    const correctCount = recentItems.filter((item) => item.isCorrect).length;
-    const accuracy = recentItems.length > 0 ? (correctCount / recentItems.length) * 100 : 0;
-
-    if (accuracy >= 80) {
-      return {
-        message: "You're doing brilliantly! Your hard work is really paying off! 🎉",
-        type: 'achievement',
-      };
-    } else if (accuracy >= 60) {
-      return {
-        message: 'Great progress! Keep up the excellent effort! 💪',
-        type: 'encouragement',
-      };
-    } else {
-      return {
-        message: "Remember, every mistake is a step towards understanding. You've got this! 🌱",
-        type: 'growth_mindset',
-      };
-    }
-  }
-
-  /**
-   * Generate reflection prompt for students
-   */
-  generateReflectionPrompt(yearGroup: string): string {
-    const prompts = {
-      young: [
-        'What was the most fun part of today?',
-        'What did you learn today?',
-        'What would you like to practice more?',
-      ],
-      middle: [
-        'What felt challenging today?',
-        'What strategy helped you the most?',
-        'What would you do differently next time?',
-      ],
-      older: [
-        'What was the most difficult concept today and why?',
-        'How did you overcome challenges in this session?',
-        'What connections can you make to other topics?',
-      ],
-    };
-
-    const yearNum = parseInt(yearGroup.replace(/\D/g, ''));
-    let category = 'middle';
-
-    if (yearNum <= 6) category = 'young';
-    else if (yearNum >= 11) category = 'older';
-
-    const categoryPrompts = prompts[category];
-    return categoryPrompts[Math.floor(Math.random() * categoryPrompts.length)];
-  }
-
-  /**
-   * Generic completion method for custom prompts
-   */
-  async generateCompletion(params: {
-    prompt: string;
-    maxTokens?: number;
-    temperature?: number;
-    model?: string;
-  }): Promise<string> {
-    if (!this.openai) {
-      throw new Error('OpenAI API key not configured');
-    }
-
-    try {
-      const response = await this.openai.chat.completions.create({
-        model: params.model || OPENAI_CHAT_MODEL,
-        messages: [
-          {
-            role: 'system',
-            content: 'You are an expert educational content creator specializing in creating high-quality assignments and questions for students.',
-          },
-          {
-            role: 'user',
-            content: params.prompt,
-          },
-        ],
-        temperature: params.temperature || 0.7,
-        max_tokens: params.maxTokens || 2000,
-      });
-
-      return response.choices[0].message.content || '';
-    } catch (error) {
-      console.error('Error generating AI completion:', error);
-      throw new Error('Failed to generate content with AI');
-    }
-  }
-}
-
 
