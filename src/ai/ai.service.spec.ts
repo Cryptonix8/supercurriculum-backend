@@ -1,4 +1,5 @@
 import { AiService } from './ai.service';
+import { buildTutorPracticeRepairInstruction } from './tutor-language.util';
 
 describe('AiService flow guards', () => {
   const createService = () =>
@@ -164,6 +165,21 @@ describe('AiService flow guards', () => {
     expect(intent).toBe('practice');
   });
 
+  it('repairs basic practice prompts that return only placeholder text', () => {
+    const service = createService();
+    const repaired = (service as any).shouldRepairStructuredResponse(
+      {
+        message: 'Here are the practice problems you requested.',
+        structuredContent: {
+          steps: ['There are practice problems for you to solve.'],
+        },
+      },
+      'practice',
+    );
+
+    expect(repaired).toBe(true);
+  });
+
   it('detects hint intent for scaffolded help requests', () => {
     const service = createService();
     const prompt = (service as any).buildTutorSystemPrompt({
@@ -181,5 +197,13 @@ describe('AiService flow guards', () => {
 
     expect(prompt).toContain('hint');
     expect(prompt).toContain('scaffold');
+  });
+
+  it('builds a focused practice repair instruction for practice requests', () => {
+    const instruction = buildTutorPracticeRepairInstruction('en');
+
+    expect(instruction).toContain('practice problems');
+    expect(instruction).toContain('separate string in the steps array');
+    expect(instruction).toContain('generic placeholder');
   });
 });

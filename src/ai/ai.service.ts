@@ -15,6 +15,7 @@ import {
 import {
   buildTutorLanguageInstruction,
   buildTutorLowQualityFallback,
+  buildTutorPracticeRepairInstruction,
   buildTutorRepairInstruction,
   extractSessionResolvedLanguage,
   mergeSessionLanguageTransition,
@@ -175,6 +176,8 @@ export class AiService {
           return [
             'Practice mode: generate exercises or practice problems that match the student level.',
             'If the student asks for several problems, place each problem as a separate string in the steps array.',
+            'Include the exact problems as the content, not generic descriptions or placeholders.',
+            'If the student asks for practice content, do not reply with a summary sentence such as "There are practice problems".',
             'Include a quickCheck and make the difficulty fit the grade and topic.',
             'Do not refuse to provide practice content.',
           ].join('\n');
@@ -214,7 +217,8 @@ export class AiService {
     const voiceInstruction = params.inputMode === 'voice'
       ? [
           'This request may come from a voice message, but it must follow the exact same tutoring rules as a typed message.',
-          'Do not skip the requested practice content. If the student asks for practice problems, provide the full problems as separate items in the steps array rather than only numbers or placeholders.',
+          'If the student asks for practice problems, include the actual problems and do not use placeholder text such as "There are practice problems".',
+          'Return each problem as a separate item in the steps array when appropriate.',
         ].join('\n')
       : undefined;
 
@@ -530,6 +534,12 @@ ${params.studentSubmission}
     });
 
     const languageInstruction = buildTutorLanguageInstruction(responseLanguage);
+    const intent = this.detectTutorIntent({
+      message: params.message,
+      context: params.context,
+      state: { flowStep: state.flowStep },
+    });
+
     const systemPrompt = this.buildTutorSystemPrompt({
       message: params.message,
       context: params.context,
@@ -572,8 +582,16 @@ ${params.studentSubmission}
       });
       let { filtered, quality } = this.applyTutorQualityFilter(parsed, responseLocaleCode);
 
-      if (!fastResponse && quality.lowQuality) {
-        const repairInstruction = buildTutorRepairInstruction(responseLanguage);
+      const shouldRepairResponse =
+        this.shouldRepairStructuredResponse(parsed, intent) ||
+        (!fastResponse && quality.lowQuality);
+
+      if (shouldRepairResponse) {
+        const repairInstruction =
+          intent === 'practice' &&
+          !(parsed.structuredContent.steps?.length || parsed.structuredContent.exercise)
+            ? buildTutorPracticeRepairInstruction(responseLanguage)
+            : buildTutorRepairInstruction(responseLanguage);
         const retry = await this.requestStructuredTutorCompletion([
           ...messages,
           { role: 'user', content: repairInstruction },
@@ -1505,6 +1523,44 @@ Use clear step-by-step equations where relevant (one transformation per line) an
     quality.correctionsApplied +=
       normalizedMessage.correctionsApplied + normalizedStructured.correctionsApplied;
     return { filtered, quality };
+  }
+
+  private shouldRepairStructuredResponse(
+    parsed: StructuredTutorResponse,
+    intent: TutorIntent,
+  ): boolean {
+    if (intent !== 'practice') {
+      return false;
+    }
+
+    const hasPracticeMaterial =
+      (parsed.structuredContent.steps?.length ?? 0) > 0 ||
+      Boolean(parsed.structuredContent.exercise);
+
+    if (!hasPracticeMaterial) {
+      return true;
+    }
+
+    return this.isGenericPracticeResponse(parsed);
+  }
+
+  private isGenericPracticeResponse(parsed: StructuredTutorResponse): boolean {
+    const placeholderPattern = /\b(practice problems?|practice exercises?|exercises?|worksheet|drill|problem set|there are practice|here are practice|there are problems|here are problems)\b/i;
+
+    const steps = parsed.structuredContent.steps || [];
+    const filteredSteps = steps
+      .map((step) => step.trim())
+      .filter(Boolean);
+    if (filteredSteps.length > 0 && filteredSteps.every((step) => placeholderPattern.test(step) && step.split(/\s+/).length < 15)) {
+      return true;
+    }
+
+    const exercise = parsed.structuredContent.exercise?.trim();
+    if (exercise && placeholderPattern.test(exercise) && exercise.split(/\s+/).length < 20) {
+      return true;
+    }
+
+    return false;
   }
 
   private normalizeStructuredContent(

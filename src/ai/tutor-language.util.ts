@@ -77,6 +77,13 @@ export function buildTutorRepairInstruction(language: TutorSpokenLanguage): stri
   return 'Επανέγραψε την προηγούμενη απάντηση με ΚΑΘΑΡΑ και σωστά Ελληνικά, χωρίς περίεργους ή αλλοιωμένους όρους, χωρίς ανάμειξη λατινικών χαρακτήρων μέσα σε ελληνικές λέξεις. Αν λείπουν στοιχεία, κάνε μία σύντομη διευκρινιστική ερώτηση αντί να εφεύρεις λέξεις. Επέστρεψε μόνο έγκυρο JSON στο ίδιο σχήμα.';
 }
 
+export function buildTutorPracticeRepairInstruction(language: TutorSpokenLanguage): string {
+  if (language === 'en') {
+    return 'The user asked for practice problems. Create actual practice problems matching the requested topic and student level. Return each problem as a separate string in the steps array. Do not reply with a generic placeholder like "There are practice problems". Return valid JSON only in the same required shape.';
+  }
+  return 'Ο χρήστης ζήτησε ασκήσεις πρακτικής. Δημιούργησε πραγματικές ασκήσεις που ταιριάζουν στο θέμα και το επίπεδο του μαθητή. Επιστρέψε κάθε άσκηση ως ξεχωριστό στοιχείο στον πίνακα steps. Μην απαντήσεις με γενική πρόταση όπως "Υπάρχουν ασκήσεις". Επέστρεψε μόνο έγκυρο JSON στο ίδιο απαιτούμενο σχήμα.';
+}
+
 export function buildTutorLowQualityFallback(language: TutorSpokenLanguage): {
   message: string;
   plan: string;
